@@ -1,0 +1,39 @@
+/**
+ * Конфигурация Wrangler для бота книжного клуба «Codex».
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "book-club-bot",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-07-07",
+	"observability": {
+		"enabled": true
+	},
+	"upload_source_maps": true,
+	"compatibility_flags": ["nodejs_compat"],
+
+	/**
+	 * KV — хранилище подписчиков и прогресса интервального повторения.
+	 */
+	"kv_namespaces": [
+		{
+			"binding": "CODEX_KV",
+			"id": "2f5c8fa4873d4ecba6fe61fb0831fb7b",
+			"preview_id": "c25cbccb04a14fafb65652b905130c0a"
+		}
+	],
+
+	/**
+	 * Cron — ежедневная рассылка карточек.
+	 * "0 7 * * *" = 07:00 UTC = 10:00 МСК (UTC+3).
+	 */
+	"triggers": {
+		"crons": ["0 7 * * *"]
+	}
+
+	/**
+	 * Токен бота хранится в секретах, а не здесь:
+	 *   wrangler secret put BOT_TOKEN
+	 */
+}

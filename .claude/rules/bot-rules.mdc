@@ -1,0 +1,52 @@
+---
+description: Правила разработки телеграм-бота Codex (Workers + KV + Cron)
+globs: src/**/*.ts
+alwaysApply: true
+---
+
+# Правила бота Codex
+
+## Типизация
+
+- Строгий TypeScript, `strict: true`. Никаких `any` — используй типы из `src/types.ts`.
+- `Flashcard` — размеченное объединение (`type: "qa" | "command"`). Сужай тип по
+  `card.type`, не обращайся к полям другого варианта.
+- Интерфейс `Env` дополняется секретами в `src/env.d.ts` (declaration merging).
+  После правок `wrangler.jsonc` перегенерируй типы: `npm run cf-typegen`.
+- Внешние ответы (`response.json()`) приводи к типу через `as`, но проверяй форму,
+  если данные могут быть некорректными (см. `fetchFlashcards`).
+
+## Обработка update от Telegram
+
+- Точка входа — `src/index.ts`. Разбирай два типа update:
+  - `update.message` → команды (`/start`, `/stop`, `/today`, `/status`);
+  - `update.callback_query` → нажатия inline-кнопок (`handlers/callback.ts`).
+- Имя команды извлекай без `@botname` и аргументов (`parseCommand`).
+- `callback_data` — компактный формат `действие:параметры` (лимит 64 байта):
+  `show:<cardId>`, `grade:<cardId>:<again|hard|easy>`.
+- На каждый `callback_query` обязательно вызывай `answerCallback`, иначе на кнопке
+  висят «часики».
+- Тяжёлую работу выполняй в `ctx.waitUntil(...)`, Telegram отвечай `200 OK` сразу —
+  иначе будут повторные доставки и таймауты.
+- Неизвестные команды/callback — не падать, а мягко отвечать пользователю.
+
+## Сеть и надёжность
+
+- Все запросы к GitHub и Telegram — через обёртки с retry (`lib/api.ts`,
+  `lib/telegram.ts`). Повторять сетевые ошибки, `5xx` и `429`; `4xx` (кроме 429) —
+  не повторять.
+- В рассылке (`runDailyBroadcast`) ошибка по одному подписчику не должна прерывать
+  остальных — оборачивай отправку в try/catch.
+
+## Логирование
+
+- Используй `console.log` для значимых событий (подписка, отписка, `/today`, оценка,
+  старт/итог рассылки) и `console.error` для ошибок. Логи видны в
+  `wrangler tail` и в Observability.
+- Не логируй `BOT_TOKEN` и прочие секреты.
+
+## UX
+
+- Весь текст — на русском. Кнопки — только inline.
+- Форматирование сообщений — `parse_mode: "HTML"`; пользовательский/данные текст
+  экранируй (`esc`) перед вставкой в HTML.

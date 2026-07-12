@@ -1,7 +1,7 @@
 // Общие типы бота «Codex».
 
 /** Идентификатор книги в репозитории book-club-data (папка books/<id>). */
-export const BOOK_ID = "docker-vvodnyy-kurs";
+export const BOOK_ID = "docker-up-and-running";
 
 // ── Данные книг ────────────────────────────────────────────────────────────
 
@@ -11,7 +11,7 @@ export interface BookMeta {
 	title: string;
 	title_original?: string;
 	edition?: number;
-	authors: string[];
+	authors: { name: string; avatar?: string }[];
 	status?: string;
 	cover?: string;
 	tags?: string[];

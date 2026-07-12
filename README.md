@@ -30,7 +30,7 @@
 
 Карточки берутся из репозитория
 [`book-club-data`](https://github.com/bookclubit/book-club-data)
-(папка `books/<bookId>`). Пока используется книга `docker-vvodnyy-kurs`.
+(папка `books/<bookId>`). Пока используется книга `docker-up-and-running`.
 
 ## Разработка
 

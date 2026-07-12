@@ -29,7 +29,7 @@ https://raw.githubusercontent.com/bookclubit/book-club-data/main/books/<bookId>/
 https://raw.githubusercontent.com/bookclubit/book-club-data/main/books/<bookId>/meta.json
 ```
 
-Пока используется только книга `docker-vvodnyy-kurs` (константа `BOOK_ID` в `src/types.ts`).
+Пока используется только книга `docker-up-and-running` (константа `BOOK_ID` в `src/types.ts`).
 Типы карточек: `qa` (вопрос/ответ) и `command` (команда/что делает).
 
 ## Структура

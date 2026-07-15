@@ -1,5 +1,5 @@
 /**
- * Codex — телеграм-бот книжного клуба для фронтендеров.
+ * «Книжный клуб» — телеграм-бот книжного клуба для фронтендеров.
  * Cloudflare Worker: вебхук Telegram + ежедневная рассылка по cron.
  */
 
@@ -58,7 +58,7 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
 
 /** Ежедневная рассылка карточек всем подписчикам. */
 async function runDailyBroadcast(env: Env): Promise<void> {
-	const subscribers = await listSubscribers(env.CODEX_KV);
+	const subscribers = await listSubscribers(env.BOOK_CLUB_KV);
 	console.log(`Ежедневная рассылка: ${subscribers.length} подписчиков`);
 
 	let delivered = 0;
@@ -79,7 +79,7 @@ export default {
 	async fetch(request, env, ctx): Promise<Response> {
 		// Health-check / проверка вручную.
 		if (request.method === "GET") {
-			return new Response("Codex book club bot is running 🤖", {
+			return new Response("Бот «Книжного клуба» работает 🤖", {
 				headers: { "content-type": "text/plain; charset=utf-8" },
 			});
 		}

@@ -65,5 +65,5 @@ curl "http://localhost:8787/__scheduled?cron=0+7+*+*+*"
 
 `wrangler dev` использует локальный KV (в `.wrangler/`). Посмотреть ключи:
 ```
-wrangler kv key list --binding CODEX_KV --local
+wrangler kv key list --binding BOOK_CLUB_KV --local
 ```

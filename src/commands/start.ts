@@ -5,7 +5,7 @@ import { saveSubscriber } from "../lib/storage";
 import { sendMessage } from "../lib/telegram";
 
 const WELCOME =
-	"👋 Привет! Это <b>Codex</b> — книжный клуб для фронтендеров.\n\n" +
+	"👋 Привет! Это <b>Книжный клуб</b> для фронтендеров.\n\n" +
 	"Каждый день в 10:00 МСК я буду присылать тебе карточки для повторения по книге " +
 	"<b>«Docker. Вводный курс»</b>. Отвечай на них и отмечай, насколько легко было вспомнить — " +
 	"я подберу интервалы повторения по алгоритму SM-2.\n\n" +
@@ -18,7 +18,7 @@ const WELCOME =
 export async function handleStart(env: Env, message: TelegramMessage): Promise<void> {
 	const chatId = message.chat.id;
 
-	await saveSubscriber(env.CODEX_KV, {
+	await saveSubscriber(env.BOOK_CLUB_KV, {
 		chatId,
 		firstName: message.from?.first_name,
 		username: message.from?.username,

@@ -97,7 +97,7 @@ export async function sendDueCards(
 
 	const [cards, progress] = await Promise.all([
 		fetchFlashcards(BOOK_ID),
-		getProgressMap(env.CODEX_KV, chatId),
+		getProgressMap(env.BOOK_CLUB_KV, chatId),
 	]);
 
 	const now = Date.now();

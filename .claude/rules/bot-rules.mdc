@@ -1,10 +1,10 @@
 ---
-description: Правила разработки телеграм-бота Codex (Workers + KV + Cron)
+description: Правила разработки телеграм-бота «Книжного клуба» (Workers + KV + Cron)
 globs: src/**/*.ts
 alwaysApply: true
 ---
 
-# Правила бота Codex
+# Правила бота «Книжного клуба»
 
 ## Типизация
 

@@ -12,7 +12,7 @@ const GOODBYE =
 export async function handleStop(env: Env, message: TelegramMessage): Promise<void> {
 	const chatId = message.chat.id;
 
-	await deleteSubscriber(env.CODEX_KV, chatId);
+	await deleteSubscriber(env.BOOK_CLUB_KV, chatId);
 
 	console.log(`Отписка: ${chatId}`);
 	await sendMessage(env.BOT_TOKEN, chatId, GOODBYE);

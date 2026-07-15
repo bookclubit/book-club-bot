@@ -10,7 +10,7 @@ async function fetchWithRetry(url: string, retries = 3): Promise<Response> {
 	for (let attempt = 0; attempt < retries; attempt++) {
 		try {
 			const res = await fetch(url, {
-				headers: { "User-Agent": "codex-book-club-bot" },
+				headers: { "User-Agent": "book-club-bot" },
 				cf: { cacheTtl: 300, cacheEverything: true },
 			});
 			// 5xx — временная ошибка, повторяем; 4xx — нет смысла.

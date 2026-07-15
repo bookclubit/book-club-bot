@@ -1,4 +1,4 @@
-// Общие типы бота «Codex».
+// Общие типы бота «Книжного клуба».
 
 /** Идентификатор книги в репозитории book-club-data (папка books/<id>). */
 export const BOOK_ID = "docker-up-and-running";

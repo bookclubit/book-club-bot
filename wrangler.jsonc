@@ -1,5 +1,5 @@
 /**
- * Конфигурация Wrangler для бота книжного клуба «Codex».
+ * Конфигурация Wrangler для бота «Книжного клуба».
  * https://developers.cloudflare.com/workers/wrangler/configuration/
  */
 {
@@ -18,7 +18,7 @@
 	 */
 	"kv_namespaces": [
 		{
-			"binding": "CODEX_KV",
+			"binding": "BOOK_CLUB_KV",
 			"id": "2f5c8fa4873d4ecba6fe61fb0831fb7b",
 			"preview_id": "c25cbccb04a14fafb65652b905130c0a"
 		}

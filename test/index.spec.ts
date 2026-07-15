@@ -16,7 +16,7 @@ describe("worker fetch", () => {
 		const response = await worker.fetch(request, env, ctx);
 		await waitOnExecutionContext(ctx);
 		expect(response.status).toBe(200);
-		expect(await response.text()).toContain("Codex");
+		expect(await response.text()).toContain("Книжного клуба");
 	});
 });
 

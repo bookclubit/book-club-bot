@@ -74,7 +74,7 @@ export async function handleCallback(env: Env, cb: TelegramCallbackQuery): Promi
 		}
 
 		const now = Date.now();
-		const prev = (await getProgress(env.CODEX_KV, chatId, cardId)) ?? undefined;
+		const prev = (await getProgress(env.BOOK_CLUB_KV, chatId, cardId)) ?? undefined;
 		const prevWithId = prev ?? {
 			cardId,
 			repetition: 0,
@@ -84,7 +84,7 @@ export async function handleCallback(env: Env, cb: TelegramCallbackQuery): Promi
 			lastReviewed: 0,
 		};
 		const next = calculateNextReview(prevWithId, grade, now);
-		await saveProgress(env.CODEX_KV, chatId, next);
+		await saveProgress(env.BOOK_CLUB_KV, chatId, next);
 
 		const days = next.interval;
 		const nextLine = `\n\n✅ <i>Оценка сохранена. Следующее повторение через ${days} ${pluralizeDays(days)}.</i>`;

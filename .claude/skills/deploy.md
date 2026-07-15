@@ -47,7 +47,7 @@ curl -s "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"
 ## Проверка работы
 
 - Открой `<WORKER_URL>` в браузере — должно вернуться
-  `Codex book club bot is running 🤖`.
+  `Бот «Книжного клуба» работает 🤖`.
 - Напиши боту `/start` — придёт приветствие.
 - Логи в реальном времени: `wrangler tail`.
 

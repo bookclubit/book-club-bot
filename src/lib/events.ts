@@ -16,9 +16,21 @@ export function eventPathById(eventId: string): string | null {
 }
 
 export async function fetchEventById(eventId: string): Promise<ClubEvent | null> {
+	// Быстрый путь: id по конвенции CMS кодирует имя файла.
 	const path = eventPathById(eventId);
-	if (!path) return null;
-	return fetchEventByPath(path);
+	if (path) {
+		const event = await fetchEventByPath(path);
+		if (event && event.id === eventId) return event;
+	}
+
+	// Фолбэк: у событий, созданных вручную, id может не совпадать с именем
+	// файла — ищем перебором по реестру (событий немного).
+	const index = await fetchIndex();
+	for (const p of index.events) {
+		const event = await fetchEventByPath(p);
+		if (event?.id === eventId) return event;
+	}
+	return null;
 }
 
 /**

@@ -41,6 +41,69 @@ export interface CommandCard extends FlashcardBase {
 
 export type Flashcard = QaCard | CommandCard;
 
+// ── События клуба и реестр контента ─────────────────────────────────────────
+
+/** Доп. материал встречи. */
+export interface EventMaterial {
+	title: string;
+	url: string;
+}
+
+interface EventBase {
+	id: string;
+	title: string;
+	/** YYYY-MM-DD */
+	date: string;
+	/** HH:MM */
+	time: string;
+	timezone: string;
+	/** Ссылка на созвон (Zoom/Meet/телеграм-эфир). */
+	call_url?: string;
+	materials?: EventMaterial[];
+}
+
+export interface ClosedChapterEvent extends EventBase {
+	type: "closed-chapter";
+	book_id: string;
+	chapter: string;
+	pages?: { from: number; to: number };
+	notes_board_url?: string;
+}
+
+export interface LiveTalkEvent extends EventBase {
+	type: "live-talk";
+	streams?: { youtube?: string; vk?: string };
+	talks: { title: string; speaker: string; speaker_id?: string }[];
+	registration_url?: string;
+	/** Книга и глава программы эфира — из них берутся темы для докладов. */
+	book_id?: string;
+	chapter?: string;
+}
+
+export type ClubEvent = ClosedChapterEvent | LiveTalkEvent;
+
+/** Ссылка на тему в chapter.json. */
+export interface TopicRef {
+	id: string;
+	title: string;
+	file: string;
+}
+
+/** Индекс главы (chapter.json) — бот использует только список тем. */
+export interface Chapter {
+	order: number;
+	title: string;
+	topics: TopicRef[];
+}
+
+/** Единый реестр контента (index.json в корне book-club-data). */
+export interface ContentIndex {
+	version: 1;
+	active_book: string;
+	books: { folder: string; id: string; title: string; chapters: string[] }[];
+	events: string[];
+}
+
 // ── Хранилище (KV) ───────────────────────────────────────────────────────────
 
 /** Подписчик на ежедневную рассылку. Ключ KV: `sub:<chatId>`. */

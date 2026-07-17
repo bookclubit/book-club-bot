@@ -7,4 +7,10 @@ interface Env {
 	BOT_TOKEN: string;
 	/** Необязательный секрет для проверки заголовка вебхука Telegram. */
 	WEBHOOK_SECRET?: string;
+	/**
+	 * chat_id админа клуба — сюда приходят заявки спикеров на модерацию.
+	 * Задаётся секретом: `wrangler secret put ADMIN_CHAT_ID`. Без него
+	 * заявки принимаются, но уведомления не отправляются.
+	 */
+	ADMIN_CHAT_ID?: string;
 }

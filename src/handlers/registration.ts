@@ -15,6 +15,7 @@ import {
 	createSpeakerClaim,
 	getDialog,
 	getSpeakerClaim,
+	getSpeakerProfile,
 	listSpeakerClaims,
 	setDialog,
 	updateSpeakerClaim,
@@ -108,6 +109,24 @@ async function notifyAdmin(env: Env, claim: SpeakerClaim): Promise<void> {
 	);
 }
 
+/**
+ * Если пользователь уже известен как спикер (имя из прошлой заявки) — заполняет
+ * новую заявку его именем/фото, отправляет админу и возвращает имя. Иначе null
+ * (нужен обычный диалог имя → фото). Убирает повторный ввод для вернувшихся.
+ */
+async function finalizeIfKnownSpeaker(env: Env, chatId: number, claimId: number): Promise<string | null> {
+	const profile = await getSpeakerProfile(env.BOOK_CLUB_DB, chatId);
+	if (!profile) return null;
+	await updateSpeakerClaim(env.BOOK_CLUB_DB, claimId, {
+		fullName: profile.fullName,
+		...(profile.photoFileId ? { photoFileId: profile.photoFileId } : {}),
+	});
+	await clearDialog(env.BOOK_CLUB_DB, chatId);
+	const claim = await getSpeakerClaim(env.BOOK_CLUB_DB, claimId);
+	if (claim) await notifyAdmin(env, claim);
+	return profile.fullName;
+}
+
 /** Нажатие на свободную тему плана: sclaim:<topicId>. */
 export async function handleClaimCallback(env: Env, cb: TelegramCallbackQuery, data: string): Promise<void> {
 	const message = cb.message;
@@ -143,6 +162,20 @@ export async function handleClaimCallback(env: Env, cb: TelegramCallbackQuery, d
 			speakerKeyboard(freeTopics(topics, claims)),
 		);
 		await answerCallback(env.BOT_TOKEN, cb.id, "Тему только что заняли");
+		return;
+	}
+
+	// Вернувшийся спикер — имя/фото уже знаем, диалог не нужен.
+	const knownName = await finalizeIfKnownSpeaker(env, message.chat.id, claim.id);
+	if (knownName) {
+		await editMessageText(
+			env.BOT_TOKEN,
+			message.chat.id,
+			message.message_id,
+			`Тема «<b>${plan.topic.title}</b>» забронирована за тобой 🎉\n\n` +
+				`Узнал тебя, <b>${knownName}</b> — заявка уже у админа. Как подтвердят, напишу!`,
+		);
+		await answerCallback(env.BOT_TOKEN, cb.id, "Тема забронирована");
 		return;
 	}
 
@@ -206,6 +239,18 @@ export async function handleDialogMessage(env: Env, message: TelegramMessage): P
 			username: message.from?.username,
 		});
 		if (!claim) return true;
+
+		// Вернувшийся спикер — имя/фото уже знаем, диалог не нужен.
+		const knownName = await finalizeIfKnownSpeaker(env, chatId, claim.id);
+		if (knownName) {
+			await sendMessage(
+				env.BOT_TOKEN,
+				chatId,
+				`Тема «<b>${text}</b>» записана. Узнал тебя, <b>${knownName}</b> — заявка отправлена админу 🎉 Как подтвердят, напишу!`,
+			);
+			return true;
+		}
+
 		await setDialog(env.BOOK_CLUB_DB, chatId, "name", claim.id);
 		await sendMessage(
 			env.BOT_TOKEN,

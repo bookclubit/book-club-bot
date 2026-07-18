@@ -180,6 +180,24 @@ export async function getSpeakerClaim(db: D1Database, id: number): Promise<Speak
 	return db.prepare("SELECT * FROM speaker_claims WHERE id = ?").bind(id).first<SpeakerClaim>();
 }
 
+/** Профиль спикера из прошлых заявок этого пользователя (имя + фото), если есть. */
+export async function getSpeakerProfile(
+	db: D1Database,
+	chatId: number,
+): Promise<{ fullName: string; photoFileId: string | null } | null> {
+	await ensureSchema(db);
+	const row = await db
+		.prepare(
+			`SELECT full_name, photo_file_id FROM speaker_claims
+			 WHERE chat_id = ? AND full_name IS NOT NULL AND full_name != ''
+			 ORDER BY created_at DESC LIMIT 1`,
+		)
+		.bind(chatId)
+		.first<{ full_name: string; photo_file_id: string | null }>();
+	if (!row) return null;
+	return { fullName: row.full_name, photoFileId: row.photo_file_id };
+}
+
 export async function updateSpeakerClaim(
 	db: D1Database,
 	id: number,

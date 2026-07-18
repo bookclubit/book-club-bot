@@ -57,11 +57,14 @@ interface EventBase {
 	/** HH:MM */
 	time: string;
 	timezone: string;
-	/** Ссылка на созвон (Zoom/Meet/телеграм-эфир). */
+	/** Ссылка на созвон (Google Meet) — только у открытых обсуждений. */
 	call_url?: string;
+	/** Трансляции YouTube/VK — есть у обоих типов встреч. */
+	streams?: { youtube?: string; vk?: string };
 	materials?: EventMaterial[];
 }
 
+/** «Открытое обсуждение» — разбор главы, прийти может любой (стримы + Meet). */
 export interface ClosedChapterEvent extends EventBase {
 	type: "closed-chapter";
 	book_id: string;
@@ -70,12 +73,12 @@ export interface ClosedChapterEvent extends EventBase {
 	notes_board_url?: string;
 }
 
+/** «Выступления» — чистовая запись докладов (стримы, без Meet). */
 export interface LiveTalkEvent extends EventBase {
 	type: "live-talk";
-	streams?: { youtube?: string; vk?: string };
 	talks: { title: string; speaker: string; speaker_id?: string }[];
 	registration_url?: string;
-	/** Книга и глава программы эфира — из них берутся темы для докладов. */
+	/** Книга и глава программы эфира. */
 	book_id?: string;
 	chapter?: string;
 }
@@ -100,7 +103,13 @@ export interface Chapter {
 export interface ContentIndex {
 	version: 1;
 	active_book: string;
-	books: { folder: string; id: string; title: string; chapters: string[] }[];
+	books: {
+		folder: string;
+		id: string;
+		title: string;
+		status?: string;
+		chapters: string[];
+	}[];
 	events: string[];
 }
 
@@ -154,6 +163,8 @@ export interface TelegramMessage {
 	from?: TelegramUser;
 	chat: TelegramChat;
 	text?: string;
+	/** Варианты размеров присланного фото (берём последний — самый крупный). */
+	photo?: { file_id: string }[];
 }
 
 export interface TelegramCallbackQuery {

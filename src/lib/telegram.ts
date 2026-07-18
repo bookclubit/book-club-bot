@@ -78,6 +78,24 @@ export function editMessageText(
 	});
 }
 
+/**
+ * Скачивает файл из Telegram (фото спикера для CMS).
+ * null — файл не найден или недоступен.
+ */
+export async function getFileResponse(token: string, fileId: string): Promise<Response | null> {
+	try {
+		const info = (await callApi(token, "getFile", { file_id: fileId })) as {
+			result?: { file_path?: string };
+		};
+		const path = info.result?.file_path;
+		if (!path) return null;
+		const res = await fetch(`https://api.telegram.org/file/bot${token}/${path}`);
+		return res.ok ? res : null;
+	} catch {
+		return null;
+	}
+}
+
 /** Отвечает на callback_query (убирает «часики» на кнопке). */
 export function answerCallback(
 	token: string,

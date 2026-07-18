@@ -8,9 +8,9 @@ import { calculateNextReview } from "../lib/spaced-repetition";
 import { getProgress, saveProgress } from "../lib/storage";
 import { answerCallback, editMessageText } from "../lib/telegram";
 import {
-	handleAdminCallback,
 	handleClaimCallback,
-	handleFreeTopicCallback,
+	handleCustomTopicCallback,
+	handleTakenCallback,
 } from "./registration";
 
 const VALID_GRADES: readonly Grade[] = ["again", "hard", "easy"];
@@ -34,10 +34,10 @@ export async function handleCallback(env: Env, cb: TelegramCallbackQuery): Promi
 		return;
 	}
 
-	// Заявки на доклады и модерация (см. handlers/registration.ts).
-	if (data.startsWith("claim:")) return handleClaimCallback(env, cb, data);
-	if (data.startsWith("freetopic:")) return handleFreeTopicCallback(env, cb, data);
-	if (data.startsWith("adm:")) return handleAdminCallback(env, cb, data);
+	// Заявки на доклады (см. handlers/registration.ts).
+	if (data.startsWith("sclaim:")) return handleClaimCallback(env, cb, data);
+	if (data.startsWith("staken:")) return handleTakenCallback(env, cb, data);
+	if (data === "scustom") return handleCustomTopicCallback(env, cb);
 
 	const chatId = message.chat.id;
 	const messageId = message.message_id;

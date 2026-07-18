@@ -54,6 +54,16 @@ export function eventDateFromPath(path: string): string | null {
 	return path.match(/\/(\d{4}-\d{2}-\d{2})-/)?.[1] ?? null;
 }
 
+/** Сегодняшняя дата по МСК (UTC+3, без переходов). */
+export function mskToday(now = Date.now()): string {
+	return new Date(now + 3 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
+/** Момент начала события в epoch ms (время события — московское). */
+export function eventStartMs(event: ClubEvent): number {
+	return Date.parse(`${event.date}T${event.time}:00+03:00`);
+}
+
 /** Сообщение со всеми ссылками встречи: созвон, доска, материалы, трансляции. */
 export function renderEventLinks(event: ClubEvent): string {
 	const lines: string[] = [
@@ -61,13 +71,12 @@ export function renderEventLinks(event: ClubEvent): string {
 		`${event.date} в ${event.time} МСК`,
 		"",
 	];
-	if (event.call_url) lines.push(`📞 Созвон: ${event.call_url}`);
+	if (event.call_url) lines.push(`📞 Подключиться (Google Meet): ${event.call_url}`);
+	if (event.streams?.youtube) lines.push(`▶️ YouTube: ${event.streams.youtube}`);
+	if (event.streams?.vk) lines.push(`▶️ VK: ${event.streams.vk}`);
 	if (event.type === "closed-chapter") {
 		if (event.notes_board_url) lines.push(`📋 Доска для совместной работы: ${event.notes_board_url}`);
 		if (event.pages) lines.push(`📖 Читаем страницы ${event.pages.from}–${event.pages.to}`);
-	} else {
-		if (event.streams?.youtube) lines.push(`▶️ YouTube: ${event.streams.youtube}`);
-		if (event.streams?.vk) lines.push(`▶️ VK: ${event.streams.vk}`);
 	}
 	for (const m of event.materials ?? []) {
 		lines.push(`📎 ${m.title}: ${m.url}`);

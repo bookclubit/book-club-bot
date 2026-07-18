@@ -79,6 +79,17 @@ export function editMessageText(
 }
 
 /**
+ * Регистрирует список команд бота (кнопка «Меню» в Telegram).
+ * Вызывается через POST /api/admin/setup после изменения набора команд.
+ */
+export function setMyCommands(
+	token: string,
+	commands: { command: string; description: string }[],
+): Promise<unknown> {
+	return callApi(token, "setMyCommands", { commands });
+}
+
+/**
  * Скачивает файл из Telegram (фото спикера для CMS).
  * null — файл не найден или недоступен.
  */

@@ -17,7 +17,7 @@ import {
 } from "./lib/db";
 import { eventDateFromPath, eventStartMs, mskToday, renderEventLinks } from "./lib/events";
 import { listSubscribers } from "./lib/storage";
-import { getFileResponse, sendMessage } from "./lib/telegram";
+import { getFileResponse, sendMessage, setMyCommands } from "./lib/telegram";
 import { handleCallback } from "./handlers/callback";
 import {
 	handleCancel,
@@ -195,6 +195,22 @@ async function handleAdminPhoto(env: Env, url: URL): Promise<Response> {
 	});
 }
 
+/** Команды бота для меню Telegram. Единственный источник списка. */
+const BOT_COMMANDS = [
+	{ command: "today", description: "Карточки к повторению прямо сейчас" },
+	{ command: "status", description: "Статистика изучения" },
+	{ command: "speaker", description: "Выступить с докладом — выбрать тему" },
+	{ command: "cancel", description: "Прервать заявку на доклад" },
+	{ command: "start", description: "Подписка на ежедневные карточки" },
+	{ command: "stop", description: "Отписаться от карточек" },
+];
+
+/** Регистрация команд в Telegram: POST /api/admin/setup (после их изменения). */
+async function handleAdminSetup(env: Env): Promise<Response> {
+	await setMyCommands(env.BOT_TOKEN, BOT_COMMANDS);
+	return json({ ok: true, commands: BOT_COMMANDS.map((c) => c.command) });
+}
+
 async function handleApi(env: Env, request: Request, url: URL): Promise<Response> {
 	if (request.method === "OPTIONS") {
 		return new Response(null, { status: 204, headers: CORS_HEADERS });
@@ -212,6 +228,9 @@ async function handleApi(env: Env, request: Request, url: URL): Promise<Response
 		}
 		if (url.pathname === "/api/admin/photo" && request.method === "GET") {
 			return handleAdminPhoto(env, url);
+		}
+		if (url.pathname === "/api/admin/setup" && request.method === "POST") {
+			return handleAdminSetup(env);
 		}
 	}
 	return json({ error: "не найдено" }, 404);

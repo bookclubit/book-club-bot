@@ -15,15 +15,18 @@ import {
 } from "./lib/auth";
 import {
 	cardKey,
+	DAILY_CARD_OPTIONS,
 	deleteSpeakerClaim,
 	getCardProgress,
 	getCardProgressMap,
+	getDailyCards,
 	getSpeakerClaim,
 	getUser,
 	listRegistrations,
 	listSpeakerClaims,
 	markReminderSent,
 	saveCardProgress,
+	setDailyCards,
 	updateSpeakerClaim,
 	upsertUser,
 } from "./lib/db";
@@ -44,15 +47,13 @@ import { handleStop } from "./commands/stop";
 import { handleToday } from "./commands/today";
 import { handleStatus } from "./commands/status";
 import { handleSettings } from "./commands/settings";
+import { handleHelp } from "./commands/help";
 
 const MORNING_INTRO =
 	"☀️ <b>Доброе утро!</b> Карточки на сегодня для повторения:";
 
 const UNKNOWN_COMMAND =
-	"Не знаю такой команды 🤔\n\n" +
-	"Доступно:\n/start — подписка на карточки\n/today — карточки сейчас\n" +
-	"/status — статистика\n/settings — карточек в день\n" +
-	"/speaker — заявка на доклад\n/stop — отписка";
+	"Не знаю такой команды 🤔\n\nСписок всех команд — /help";
 
 /** Извлекает имя команды из текста: «/today@bot arg» → «today». */
 function parseCommand(text: string): string | null {
@@ -104,6 +105,8 @@ async function routeMessage(env: Env, message: TelegramMessage): Promise<void> {
 			return handleStatus(env, message);
 		case "settings":
 			return handleSettings(env, message);
+		case "help":
+			return handleHelp(env, message);
 		default:
 			await sendMessage(env.BOT_TOKEN, message.chat.id, UNKNOWN_COMMAND);
 	}
@@ -220,6 +223,7 @@ const BOT_COMMANDS = [
 	{ command: "settings", description: "Сколько карточек в день" },
 	{ command: "speaker", description: "Выступить с докладом — выбрать тему" },
 	{ command: "cancel", description: "Прервать заявку на доклад" },
+	{ command: "help", description: "Помощь и список команд" },
 	{ command: "start", description: "Подписка на ежедневные карточки" },
 	{ command: "stop", description: "Отписаться от карточек" },
 ];
@@ -294,6 +298,28 @@ async function handleProgress(env: Env, userId: number): Promise<Response> {
 	return json({ progress: [...map.values()] });
 }
 
+/** Настройки пользователя: GET /api/settings. */
+async function handleGetSettings(env: Env, userId: number): Promise<Response> {
+	const daily = await getDailyCards(env.BOOK_CLUB_DB, userId);
+	return json({ daily_cards: daily, options: DAILY_CARD_OPTIONS });
+}
+
+/** Изменение настроек: POST /api/settings { daily_cards }. */
+async function handleSetSettings(env: Env, userId: number, request: Request): Promise<Response> {
+	let body: { daily_cards?: number };
+	try {
+		body = (await request.json()) as typeof body;
+	} catch {
+		return json({ error: "невалидный JSON" }, 400);
+	}
+	const n = Number(body.daily_cards);
+	if (!DAILY_CARD_OPTIONS.includes(n)) {
+		return json({ error: `daily_cards ∈ ${DAILY_CARD_OPTIONS.join(", ")}` }, 400);
+	}
+	await setDailyCards(env.BOOK_CLUB_DB, userId, n);
+	return json({ daily_cards: n });
+}
+
 /** Оценка карточки: POST /api/review { card_id, book_id, grade }. */
 async function handleReview(env: Env, userId: number, request: Request): Promise<Response> {
 	let body: { card_id?: string; book_id?: string; grade?: string };
@@ -340,7 +366,8 @@ async function handleApi(env: Env, request: Request, url: URL): Promise<Response
 	if (
 		url.pathname === "/api/me" ||
 		url.pathname === "/api/progress" ||
-		url.pathname === "/api/review"
+		url.pathname === "/api/review" ||
+		url.pathname === "/api/settings"
 	) {
 		const userId = await authUser(env, request);
 		if (userId === null) return json({ error: "нужен вход через Telegram" }, 401);
@@ -350,6 +377,12 @@ async function handleApi(env: Env, request: Request, url: URL): Promise<Response
 		}
 		if (url.pathname === "/api/review" && request.method === "POST") {
 			return handleReview(env, userId, request);
+		}
+		if (url.pathname === "/api/settings" && request.method === "GET") {
+			return handleGetSettings(env, userId);
+		}
+		if (url.pathname === "/api/settings" && request.method === "POST") {
+			return handleSetSettings(env, userId, request);
 		}
 	}
 

@@ -62,6 +62,8 @@ interface EventBase {
 	/** Трансляции YouTube/VK — есть у обоих типов встреч. */
 	streams?: { youtube?: string; vk?: string };
 	materials?: EventMaterial[];
+	/** Админ отметил встречу завершённой — напоминания больше не шлём. */
+	finished?: boolean;
 }
 
 /** «Открытое обсуждение» — разбор главы, прийти может любой (стримы + Meet). */
@@ -73,12 +75,11 @@ export interface ClosedChapterEvent extends EventBase {
 	notes_board_url?: string;
 }
 
-/** «Выступления» — чистовая запись докладов (стримы, без Meet). */
+/** «Доклады» — чистовая запись докладов (стримы, без Meet). */
 export interface LiveTalkEvent extends EventBase {
 	type: "live-talk";
 	talks: { title: string; speaker: string; speaker_id?: string }[];
-	registration_url?: string;
-	/** Книга и глава программы эфира. */
+	/** Книга и глава программы докладов. */
 	book_id?: string;
 	chapter?: string;
 }

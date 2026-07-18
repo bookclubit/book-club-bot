@@ -248,7 +248,7 @@ const REMINDER_TEXT: Record<ReminderKind, string> = {
 /** Шлёт записавшимся напоминание нужного вида (если ещё не отправляли). */
 async function sendEventReminder(env: Env, path: string, kind: ReminderKind): Promise<void> {
 	const event = await fetchEventByPath(path);
-	if (!event) return;
+	if (!event || event.finished) return;
 	const fresh = await markReminderSent(env.BOOK_CLUB_DB, event.id, kind);
 	if (!fresh) return;
 

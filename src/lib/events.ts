@@ -34,7 +34,7 @@ export async function fetchEventById(eventId: string): Promise<ClubEvent | null>
 }
 
 /**
- * Темы программы события: у эфира указаны book_id и chapter, темы берутся
+ * Темы программы события: у докладов указаны book_id и chapter, темы берутся
  * из chapter.json. book_id может быть и id из meta, и именем папки —
  * резолвим через реестр.
  */

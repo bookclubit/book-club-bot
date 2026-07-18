@@ -13,8 +13,8 @@ import {
 	verifySession,
 	type TgUser,
 } from "./lib/auth";
-import { sendDueCards } from "./lib/cards";
 import {
+	cardKey,
 	deleteSpeakerClaim,
 	getCardProgress,
 	getCardProgressMap,
@@ -28,6 +28,7 @@ import {
 	upsertUser,
 } from "./lib/db";
 import { reviewFromQuality } from "./lib/spaced-repetition";
+import { startStudy } from "./lib/study";
 import { eventDateFromPath, eventStartMs, mskToday, renderEventLinks } from "./lib/events";
 import { listSubscribers } from "./lib/storage";
 import { getFileResponse, sendMessage, setMyCommands } from "./lib/telegram";
@@ -42,6 +43,7 @@ import { handleStart } from "./commands/start";
 import { handleStop } from "./commands/stop";
 import { handleToday } from "./commands/today";
 import { handleStatus } from "./commands/status";
+import { handleSettings } from "./commands/settings";
 
 const MORNING_INTRO =
 	"☀️ <b>Доброе утро!</b> Карточки на сегодня для повторения:";
@@ -49,7 +51,8 @@ const MORNING_INTRO =
 const UNKNOWN_COMMAND =
 	"Не знаю такой команды 🤔\n\n" +
 	"Доступно:\n/start — подписка на карточки\n/today — карточки сейчас\n" +
-	"/status — статистика\n/speaker — заявка на доклад\n/stop — отписка";
+	"/status — статистика\n/settings — карточек в день\n" +
+	"/speaker — заявка на доклад\n/stop — отписка";
 
 /** Извлекает имя команды из текста: «/today@bot arg» → «today». */
 function parseCommand(text: string): string | null {
@@ -99,6 +102,8 @@ async function routeMessage(env: Env, message: TelegramMessage): Promise<void> {
 			return handleToday(env, message);
 		case "status":
 			return handleStatus(env, message);
+		case "settings":
+			return handleSettings(env, message);
 		default:
 			await sendMessage(env.BOT_TOKEN, message.chat.id, UNKNOWN_COMMAND);
 	}
@@ -210,8 +215,9 @@ async function handleAdminPhoto(env: Env, url: URL): Promise<Response> {
 
 /** Команды бота для меню Telegram. Единственный источник списка. */
 const BOT_COMMANDS = [
-	{ command: "today", description: "Карточки к повторению прямо сейчас" },
+	{ command: "today", description: "Начать повторение карточек" },
 	{ command: "status", description: "Статистика изучения" },
+	{ command: "settings", description: "Сколько карточек в день" },
 	{ command: "speaker", description: "Выступить с докладом — выбрать тему" },
 	{ command: "cancel", description: "Прервать заявку на доклад" },
 	{ command: "start", description: "Подписка на ежедневные карточки" },
@@ -297,23 +303,25 @@ async function handleReview(env: Env, userId: number, request: Request): Promise
 		return json({ error: "невалидный JSON" }, 400);
 	}
 	const cardId = body.card_id;
+	const bookId = body.book_id;
 	const grade = body.grade;
-	if (!cardId || !grade || !(grade in PLATFORM_QUALITY)) {
-		return json({ error: "нужны card_id и grade (again|hard|good|easy)" }, 400);
+	if (!cardId || !bookId || !grade || !(grade in PLATFORM_QUALITY)) {
+		return json({ error: "нужны card_id, book_id и grade (again|hard|good|easy)" }, 400);
 	}
 
+	// Композитный ключ «<book>:<cardId>» — общий с ботом (карточки по всем книгам).
+	const key = cardKey(bookId, cardId);
 	const now = Date.now();
-	const prev =
-		(await getCardProgress(env.BOOK_CLUB_DB, userId, cardId)) ?? {
-			cardId,
-			repetition: 0,
-			interval: 0,
-			easiness: 2.5,
-			dueDate: now,
-			lastReviewed: 0,
-		};
+	const prev = (await getCardProgress(env.BOOK_CLUB_DB, userId, key)) ?? {
+		cardId: key,
+		repetition: 0,
+		interval: 0,
+		easiness: 2.5,
+		dueDate: now,
+		lastReviewed: 0,
+	};
 	const next = reviewFromQuality(prev, PLATFORM_QUALITY[grade], now);
-	await saveCardProgress(env.BOOK_CLUB_DB, userId, body.book_id ?? "", next);
+	await saveCardProgress(env.BOOK_CLUB_DB, userId, bookId, next);
 	return json({ progress: next });
 }
 
@@ -428,7 +436,7 @@ async function runDailyBroadcast(env: Env): Promise<void> {
 	let delivered = 0;
 	for (const sub of subscribers) {
 		try {
-			const sent = await sendDueCards(env, sub.chatId, { intro: MORNING_INTRO });
+			const sent = await startStudy(env, sub.chatId, { intro: MORNING_INTRO });
 			if (sent > 0) delivered++;
 		} catch (err) {
 			// Ошибка по одному подписчику (например, бот заблокирован) не должна

@@ -1,14 +1,6 @@
-// Рендеринг карточек и отправка «к повторению» пользователю.
+// Рендеринг карточек и клавиатуры для диалогового повторения (по одной).
 
 import type { Flashcard, Grade, InlineKeyboardMarkup } from "../types";
-import { BOOK_ID } from "../types";
-import { fetchFlashcards } from "./api";
-import { getCardProgressMap } from "./db";
-import { getDueCards } from "./spaced-repetition";
-import { sendMessage } from "./telegram";
-
-/** Сколько карточек отправляем за один заход. */
-export const CARDS_PER_SESSION = 5;
 
 const DIFFICULTY_RU: Record<string, string> = {
 	easy: "лёгкая",
@@ -22,26 +14,24 @@ const GRADE_LABEL: Record<Grade, string> = {
 	easy: "🟢 Легко",
 };
 
-// ── callback_data ────────────────────────────────────────────────────────────
+// ── callback_data (короткие — текущая карточка берётся из сессии в D1) ────────
 
-export const showAnswerData = (cardId: string) => `show:${cardId}`;
-export const gradeData = (cardId: string, grade: Grade) => `grade:${cardId}:${grade}`;
+export const STUDY_FLIP = "sf"; // показать ответ
+export const studyGradeData = (grade: Grade) => `sg:${grade}`;
 
-/** Клавиатура лицевой стороны — одна кнопка «Показать ответ». */
-export function frontKeyboard(cardId: string): InlineKeyboardMarkup {
-	return {
-		inline_keyboard: [[{ text: "👀 Показать ответ", callback_data: showAnswerData(cardId) }]],
-	};
+/** Клавиатура лицевой стороны — «Показать ответ». */
+export function flipKeyboard(): InlineKeyboardMarkup {
+	return { inline_keyboard: [[{ text: "👀 Показать ответ", callback_data: STUDY_FLIP }]] };
 }
 
 /** Клавиатура обратной стороны — оценка ответа. */
-export function gradeKeyboard(cardId: string): InlineKeyboardMarkup {
+export function gradeKeyboard(): InlineKeyboardMarkup {
 	return {
 		inline_keyboard: [
 			[
-				{ text: GRADE_LABEL.again, callback_data: gradeData(cardId, "again") },
-				{ text: GRADE_LABEL.hard, callback_data: gradeData(cardId, "hard") },
-				{ text: GRADE_LABEL.easy, callback_data: gradeData(cardId, "easy") },
+				{ text: GRADE_LABEL.again, callback_data: studyGradeData("again") },
+				{ text: GRADE_LABEL.hard, callback_data: studyGradeData("hard") },
+				{ text: GRADE_LABEL.easy, callback_data: studyGradeData("easy") },
 			],
 		],
 	};
@@ -79,38 +69,4 @@ export function renderBack(card: Flashcard): string {
 		`⌨️ <b>Команда</b>\n\n<code>${esc(card.command)}</code>\n\n` +
 		`💡 <b>Что делает:</b>\n${esc(card.result)}\n\n${footer(card)}`
 	);
-}
-
-// ── Отправка сессии повторения ───────────────────────────────────────────────
-
-/**
- * Считает и отправляет пользователю карточки к повторению.
- * @param intro необязательное вступление, отправляется перед карточками, если они есть
- * @returns число отправленных карточек
- */
-export async function sendDueCards(
-	env: Env,
-	chatId: number,
-	opts: { limit?: number; intro?: string } = {},
-): Promise<number> {
-	const { limit = CARDS_PER_SESSION, intro } = opts;
-
-	const [cards, progress] = await Promise.all([
-		fetchFlashcards(BOOK_ID),
-		getCardProgressMap(env.BOOK_CLUB_DB, chatId),
-	]);
-
-	const now = Date.now();
-	const due = getDueCards(cards, progress, now, limit);
-
-	if (due.length === 0) return 0;
-
-	if (intro) {
-		await sendMessage(env.BOT_TOKEN, chatId, intro);
-	}
-	for (const card of due) {
-		await sendMessage(env.BOT_TOKEN, chatId, renderFront(card), frontKeyboard(card.id));
-	}
-
-	return due.length;
 }

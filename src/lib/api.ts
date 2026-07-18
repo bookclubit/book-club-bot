@@ -1,6 +1,6 @@
 // Загрузка данных из репозитория book-club-data (GitHub raw).
 
-import type { BookMeta, Chapter, ClubEvent, ContentIndex, Flashcard } from "../types";
+import type { BookMeta, Chapter, ClubEvent, ContentIndex, DeckCard, Flashcard } from "../types";
 
 const RAW_ROOT = "https://raw.githubusercontent.com/bookclubit/book-club-data/main";
 const DATA_BASE = `${RAW_ROOT}/books`;
@@ -39,6 +39,25 @@ export async function fetchFlashcards(bookId: string): Promise<Flashcard[]> {
 		throw new Error(`Некорректный формат flashcards.json для ${bookId}`);
 	}
 	return data;
+}
+
+/**
+ * Карточки по всем книгам клуба (из реестра). Книги без flashcards.json
+ * (404) просто пропускаются. Каждая карточка помечена своей книгой.
+ */
+export async function fetchAllFlashcards(): Promise<DeckCard[]> {
+	const index = await fetchIndex();
+	const perBook = await Promise.all(
+		index.books.map(async (b): Promise<DeckCard[]> => {
+			try {
+				const cards = await fetchFlashcards(b.folder);
+				return cards.map((card) => ({ book: b.folder, card }));
+			} catch {
+				return [];
+			}
+		}),
+	);
+	return perBook.flat();
 }
 
 /** Загружает метаданные книги. */

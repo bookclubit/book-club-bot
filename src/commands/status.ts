@@ -1,35 +1,36 @@
-// /status — статистика изучения.
+// /status — статистика изучения по всем книгам клуба.
 
 import type { TelegramMessage } from "../types";
-import { BOOK_ID } from "../types";
-import { fetchFlashcards } from "../lib/api";
-import { getCardProgressMap } from "../lib/db";
+import { fetchAllFlashcards } from "../lib/api";
+import { cardKey, getCardProgressMap } from "../lib/db";
 import { sendMessage } from "../lib/telegram";
 
 export async function handleStatus(env: Env, message: TelegramMessage): Promise<void> {
 	const chatId = message.chat.id;
 
-	const [cards, progress] = await Promise.all([
-		fetchFlashcards(BOOK_ID),
+	const [deck, progress] = await Promise.all([
+		fetchAllFlashcards(),
 		getCardProgressMap(env.BOOK_CLUB_DB, chatId),
 	]);
 
 	const now = Date.now();
-	const total = cards.length;
-	const started = progress.size;
-	const fresh = total - started;
+	const total = deck.length;
 
-	// Просроченные среди начатых + новые = ждут повторения.
-	let overdueStarted = 0;
-	for (const p of progress.values()) {
-		if (p.dueDate <= now) overdueStarted++;
+	let started = 0;
+	let overdue = 0;
+	for (const d of deck) {
+		const p = progress.get(cardKey(d.book, d.card.id));
+		if (!p) continue;
+		started++;
+		if (p.dueDate <= now) overdue++;
 	}
-	const dueNow = overdueStarted + fresh;
-	const scheduled = started - overdueStarted;
+	const fresh = total - started;
+	const dueNow = overdue + fresh; // просроченные среди начатых + новые
+	const scheduled = started - overdue;
 
 	const text =
 		"📊 <b>Твоя статистика</b>\n" +
-		"<i>Docker. Вводный курс</i>\n\n" +
+		"<i>Все книги клуба</i>\n\n" +
 		`📚 Всего карточек: <b>${total}</b>\n` +
 		`✅ В работе: <b>${started}</b>\n` +
 		`🆕 Новых: <b>${fresh}</b>\n` +

@@ -1,22 +1,22 @@
-// /today — прислать карточки для повторения прямо сейчас.
+// /today — начать повторение карточек прямо сейчас (по одной, диалогом).
 
 import type { TelegramMessage } from "../types";
-import { sendDueCards } from "../lib/cards";
+import { startStudy } from "../lib/study";
 import { sendMessage } from "../lib/telegram";
 
 export async function handleToday(env: Env, message: TelegramMessage): Promise<void> {
 	const chatId = message.chat.id;
 
-	const sent = await sendDueCards(env, chatId);
+	const count = await startStudy(env, chatId);
 
-	if (sent === 0) {
+	if (count === 0) {
 		await sendMessage(
 			env.BOT_TOKEN,
 			chatId,
-			"🎉 На сейчас карточек для повторения нет. Все повторено — возвращайся позже!",
+			"🎉 Карточек к повторению сейчас нет. Всё повторено — возвращайся позже!",
 		);
 		return;
 	}
 
-	console.log(`/today: отправлено ${sent} карточек пользователю ${chatId}`);
+	console.log(`/today: старт сессии на ${count} карточек для ${chatId}`);
 }

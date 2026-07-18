@@ -1,13 +1,10 @@
-// Доступ к KV: подписчики и прогресс повторения.
+// Доступ к KV: подписчики рассылки. Прогресс карточек живёт в D1 (см. lib/db.ts).
 
-import type { CardProgress, Subscriber } from "../types";
+import type { Subscriber } from "../types";
 
 const SUB_PREFIX = "sub:";
-const PROGRESS_PREFIX = "progress:";
 
 const subKey = (chatId: number) => `${SUB_PREFIX}${chatId}`;
-const progressKey = (chatId: number, cardId: string) =>
-	`${PROGRESS_PREFIX}${chatId}:${cardId}`;
 
 // ── Подписчики ───────────────────────────────────────────────────────────────
 
@@ -47,43 +44,4 @@ export async function listSubscribers(kv: KVNamespace): Promise<Subscriber[]> {
 	} while (cursor);
 
 	return subscribers;
-}
-
-// ── Прогресс повторения ──────────────────────────────────────────────────────
-
-export async function getProgress(
-	kv: KVNamespace,
-	chatId: number,
-	cardId: string,
-): Promise<CardProgress | null> {
-	return kv.get<CardProgress>(progressKey(chatId, cardId), "json");
-}
-
-export async function saveProgress(
-	kv: KVNamespace,
-	chatId: number,
-	progress: CardProgress,
-): Promise<void> {
-	await kv.put(progressKey(chatId, progress.cardId), JSON.stringify(progress));
-}
-
-/** Загружает весь прогресс пользователя в map cardId → прогресс. */
-export async function getProgressMap(
-	kv: KVNamespace,
-	chatId: number,
-): Promise<Map<string, CardProgress>> {
-	const map = new Map<string, CardProgress>();
-	const prefix = `${PROGRESS_PREFIX}${chatId}:`;
-	let cursor: string | undefined;
-
-	do {
-		const page = await kv.list({ prefix, cursor });
-		for (const key of page.keys) {
-			const p = await kv.get<CardProgress>(key.name, "json");
-			if (p) map.set(p.cardId, p);
-		}
-		cursor = page.list_complete ? undefined : page.cursor;
-	} while (cursor);
-
-	return map;
 }

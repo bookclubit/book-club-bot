@@ -41,6 +41,12 @@ export interface CommandCard extends FlashcardBase {
 
 export type Flashcard = QaCard | CommandCard;
 
+/** Карточка с привязкой к книге (папке) — для колоды по всем книгам клуба. */
+export interface DeckCard {
+	book: string; // имя папки книги в book-club-data
+	card: Flashcard;
+}
+
 // ── События клуба и реестр контента ─────────────────────────────────────────
 
 /** Доп. материал встречи. */

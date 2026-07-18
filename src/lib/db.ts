@@ -90,6 +90,7 @@ const SCHEMA = [
 		updated_at INTEGER NOT NULL
 	)`,
 	// Единый прогресс карточек (SM-2): общий для бота и сайта, ключ — Telegram id.
+	// card_id — композитный «<book>:<cardId>» (карточки по всем книгам клуба).
 	`CREATE TABLE IF NOT EXISTS card_progress (
 		user_id INTEGER NOT NULL,
 		card_id TEXT NOT NULL,
@@ -101,7 +102,23 @@ const SCHEMA = [
 		last_reviewed INTEGER NOT NULL,
 		PRIMARY KEY (user_id, card_id)
 	)`,
+	// Настройки пользователя (сколько карточек в день и т.п.).
+	`CREATE TABLE IF NOT EXISTS user_settings (
+		user_id INTEGER PRIMARY KEY,
+		daily_cards INTEGER NOT NULL DEFAULT 5,
+		updated_at INTEGER NOT NULL
+	)`,
+	// Активная сессия повторения в боте (карточки по одной): очередь оставшихся.
+	`CREATE TABLE IF NOT EXISTS study_session (
+		user_id INTEGER PRIMARY KEY,
+		queue TEXT NOT NULL,
+		reviewed INTEGER NOT NULL DEFAULT 0,
+		updated_at INTEGER NOT NULL
+	)`,
 ];
+
+/** Композитный ключ прогресса карточки (уникален по всем книгам). */
+export const cardKey = (book: string, cardId: string): string => `${book}:${cardId}`;
 
 export async function ensureSchema(db: D1Database): Promise<void> {
 	if (schemaReady) return;
@@ -383,4 +400,81 @@ export async function saveCardProgress(
 			progress.lastReviewed,
 		)
 		.run();
+}
+
+// ── Настройки пользователя ───────────────────────────────────────────────────
+
+export const DEFAULT_DAILY_CARDS = 5;
+/** Допустимые значения «карточек в день» (кнопки настроек в боте и miniapp). */
+export const DAILY_CARD_OPTIONS = [3, 5, 10, 15, 20];
+
+/** Сколько карточек в день выдавать пользователю (по умолчанию 5). */
+export async function getDailyCards(db: D1Database, userId: number): Promise<number> {
+	await ensureSchema(db);
+	const row = await db
+		.prepare("SELECT daily_cards FROM user_settings WHERE user_id = ?")
+		.bind(userId)
+		.first<{ daily_cards: number }>();
+	return row?.daily_cards ?? DEFAULT_DAILY_CARDS;
+}
+
+export async function setDailyCards(db: D1Database, userId: number, n: number): Promise<void> {
+	await ensureSchema(db);
+	await db
+		.prepare(
+			`INSERT INTO user_settings (user_id, daily_cards, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(user_id) DO UPDATE SET daily_cards = excluded.daily_cards,
+				updated_at = excluded.updated_at`,
+		)
+		.bind(userId, n, Date.now())
+		.run();
+}
+
+// ── Сессия повторения (карточки по одной, диалог) ────────────────────────────
+
+/** Элемент очереди повторения: книга + id карточки. */
+export interface SessionCard {
+	b: string;
+	c: string;
+}
+
+export interface StudySession {
+	queue: SessionCard[];
+	reviewed: number;
+}
+
+export async function saveSession(
+	db: D1Database,
+	userId: number,
+	queue: SessionCard[],
+	reviewed: number,
+): Promise<void> {
+	await ensureSchema(db);
+	await db
+		.prepare(
+			`INSERT INTO study_session (user_id, queue, reviewed, updated_at) VALUES (?, ?, ?, ?)
+			 ON CONFLICT(user_id) DO UPDATE SET queue = excluded.queue,
+				reviewed = excluded.reviewed, updated_at = excluded.updated_at`,
+		)
+		.bind(userId, JSON.stringify(queue), reviewed, Date.now())
+		.run();
+}
+
+export async function getSession(db: D1Database, userId: number): Promise<StudySession | null> {
+	await ensureSchema(db);
+	const row = await db
+		.prepare("SELECT queue, reviewed FROM study_session WHERE user_id = ?")
+		.bind(userId)
+		.first<{ queue: string; reviewed: number }>();
+	if (!row) return null;
+	try {
+		return { queue: JSON.parse(row.queue) as SessionCard[], reviewed: row.reviewed };
+	} catch {
+		return null;
+	}
+}
+
+export async function clearSession(db: D1Database, userId: number): Promise<void> {
+	await ensureSchema(db);
+	await db.prepare("DELETE FROM study_session WHERE user_id = ?").bind(userId).run();
 }

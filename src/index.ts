@@ -238,11 +238,10 @@ async function handleApi(env: Env, request: Request, url: URL): Promise<Response
 
 // ── Напоминания и рассылка ───────────────────────────────────────────────────
 
-type ReminderKind = "morning" | "hour" | "start";
+type ReminderKind = "morning" | "start";
 
 const REMINDER_TEXT: Record<ReminderKind, string> = {
 	morning: "⏰ Сегодня встреча клуба!",
-	hour: "⏰ Встреча клуба уже через час!",
 	start: "🚀 Встреча начинается — подключайся!",
 };
 
@@ -275,7 +274,7 @@ async function runMorningReminders(env: Env): Promise<void> {
 	}
 }
 
-/** «За час» и «началась» — из cron каждые 15 минут. */
+/** «Встреча началась» — из cron каждые 15 минут. */
 async function runTimedReminders(env: Env): Promise<void> {
 	const now = Date.now();
 	const today = mskToday(now);
@@ -287,10 +286,7 @@ async function runTimedReminders(env: Env): Promise<void> {
 		if (!event) continue;
 		const start = eventStartMs(event);
 
-		// Окна шире шага cron, дубли отсекает markReminderSent.
-		if (now >= start - 60 * 60 * 1000 && now < start - 30 * 60 * 1000) {
-			await sendEventReminder(env, path, "hour");
-		}
+		// Окно шире шага cron, дубли отсекает markReminderSent.
 		if (now >= start && now < start + 20 * 60 * 1000) {
 			await sendEventReminder(env, path, "start");
 		}
@@ -378,7 +374,7 @@ export default {
 			);
 			return;
 		}
-		// Каждые 15 минут: «за час» и «встреча началась».
+		// Каждые 15 минут: «встреча началась».
 		ctx.waitUntil(
 			runTimedReminders(env).catch((err) =>
 				console.error("Ошибка напоминаний о встречах:", err),

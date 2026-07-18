@@ -34,7 +34,7 @@ import { reviewFromQuality } from "./lib/spaced-repetition";
 import { startStudy } from "./lib/study";
 import { eventDateFromPath, eventStartMs, mskToday, renderEventLinks } from "./lib/events";
 import { listSubscribers } from "./lib/storage";
-import { getFileResponse, sendMessage, setMyCommands } from "./lib/telegram";
+import { getFileResponse, sendMessage, setChatMenuButton, setMyCommands } from "./lib/telegram";
 import { handleCallback } from "./handlers/callback";
 import {
 	handleCancel,
@@ -228,10 +228,17 @@ const BOT_COMMANDS = [
 	{ command: "stop", description: "Отписаться от карточек" },
 ];
 
-/** Регистрация команд в Telegram: POST /api/admin/setup (после их изменения). */
+/** Мини-приложение клуба (Telegram Mini App / сайт). */
+const MINIAPP_URL = "https://book-club-miniapp.vercel.app";
+
+/**
+ * Настройка бота: POST /api/admin/setup — регистрирует команды меню и кнопку
+ * «Открыть приложение» (Mini App). Вызывать после изменения набора команд.
+ */
 async function handleAdminSetup(env: Env): Promise<Response> {
 	await setMyCommands(env.BOT_TOKEN, BOT_COMMANDS);
-	return json({ ok: true, commands: BOT_COMMANDS.map((c) => c.command) });
+	await setChatMenuButton(env.BOT_TOKEN, "🗂 Приложение", MINIAPP_URL);
+	return json({ ok: true, commands: BOT_COMMANDS.map((c) => c.command), menu_button: MINIAPP_URL });
 }
 
 // ── Платформа: вход через Telegram и единый прогресс карточек ─────────────────

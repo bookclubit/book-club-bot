@@ -90,6 +90,16 @@ export function setMyCommands(
 }
 
 /**
+ * Задаёт кнопку-меню бота как Mini App (открывает приложение внутри Telegram).
+ * Внутри Mini App доступен initData — вход на платформу без настройки домена.
+ */
+export function setChatMenuButton(token: string, text: string, url: string): Promise<unknown> {
+	return callApi(token, "setChatMenuButton", {
+		menu_button: { type: "web_app", text, web_app: { url } },
+	});
+}
+
+/**
  * Скачивает файл из Telegram (фото спикера для CMS).
  * null — файл не найден или недоступен.
  */

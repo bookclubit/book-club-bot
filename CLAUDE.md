@@ -53,7 +53,10 @@ https://raw.githubusercontent.com/bookclubit/book-club-data/main/books/<bookId>/
 https://raw.githubusercontent.com/bookclubit/book-club-data/main/books/<bookId>/meta.json
 ```
 
-Пока используется только книга `docker-up-and-running` (константа `BOOK_ID` в `src/types.ts`).
+Карточки берутся по **всем книгам клуба** (обход `index.json`, `fetchAllFlashcards`),
+не только Docker. Повторение — по одной, диалогом: очередь в D1 (`study_session`),
+кнопки с коротким `callback_data` (`sf`/`sg:<grade>`). Лимит карт/день — `/settings`
+(`user_settings`). Прогресс SM-2 — в D1, ключ `<book>:<cardId>`.
 Типы карточек: `qa` (вопрос/ответ) и `command` (команда/что делает).
 
 ## Структура

@@ -21,8 +21,10 @@ import {
 	updateSpeakerClaim,
 	type SpeakerClaim,
 } from "../lib/db";
+import { fetchIndex } from "../lib/api";
 import { fetchEventById, renderEventLinks } from "../lib/events";
 import { fetchPlanTopics, type PlanTopic } from "../lib/plan";
+import { findSpeakerByUsername } from "../lib/speakers";
 import { answerCallback, editMessageText, sendMessage } from "../lib/telegram";
 
 /** Страница модерации заявок в CMS (уведомление админу ведёт сюда). */
@@ -103,28 +105,58 @@ async function notifyAdmin(env: Env, claim: SpeakerClaim): Promise<void> {
 		Number(env.ADMIN_CHAT_ID),
 		`🎤 <b>Новая заявка на доклад</b>\n\n` +
 			`Тема: <b>${claim.topic_title}</b>${claim.topic_id ? "" : " (своя, вне плана)"}\n` +
-			`Спикер: ${from || `id ${claim.chat_id}`}\n` +
-			`Фото: ${claim.photo_file_id ? "есть" : "нет"}\n\n` +
+			`Спикер: ${from || `id ${claim.chat_id}`}${claim.speaker_id ? " · из каталога ✓" : ""}\n` +
+			`Фото: ${claim.photo_file_id ? "есть" : claim.speaker_id ? "из каталога" : "нет"}\n\n` +
 			`Подтвердить или отклонить: ${CMS_CLAIMS_URL}`,
 	);
 }
 
 /**
- * Если пользователь уже известен как спикер (имя из прошлой заявки) — заполняет
- * новую заявку его именем/фото, отправляет админу и возвращает имя. Иначе null
- * (нужен обычный диалог имя → фото). Убирает повторный ввод для вернувшихся.
+ * Если заявитель уже известен — заполняет новую заявку его именем/фото,
+ * отправляет админу и возвращает имя. Источники (по приоритету):
+ *   1) каталог CMS — Telegram username совпал с socials.telegram спикера;
+ *   2) прошлые заявки этого пользователя в боте.
+ * Иначе null — нужен обычный диалог имя → фото.
  */
-async function finalizeIfKnownSpeaker(env: Env, chatId: number, claimId: number): Promise<string | null> {
-	const profile = await getSpeakerProfile(env.BOOK_CLUB_DB, chatId);
-	if (!profile) return null;
+async function finalizeIfKnownSpeaker(
+	env: Env,
+	chatId: number,
+	claimId: number,
+	username?: string,
+): Promise<string | null> {
+	let fullName: string | null = null;
+	let speakerId: string | null = null;
+	let photoFileId: string | null = null;
+
+	// 1) Каталог спикеров: узнаём по Telegram-нику.
+	if (username) {
+		const index = await fetchIndex();
+		const speaker = findSpeakerByUsername(index, username);
+		if (speaker) {
+			fullName = speaker.name;
+			speakerId = speaker.id;
+		}
+	}
+	// 2) Прошлые заявки в боте.
+	if (!fullName) {
+		const profile = await getSpeakerProfile(env.BOOK_CLUB_DB, chatId);
+		if (profile) {
+			fullName = profile.fullName;
+			speakerId = profile.speakerId;
+			photoFileId = profile.photoFileId;
+		}
+	}
+	if (!fullName) return null;
+
 	await updateSpeakerClaim(env.BOOK_CLUB_DB, claimId, {
-		fullName: profile.fullName,
-		...(profile.photoFileId ? { photoFileId: profile.photoFileId } : {}),
+		fullName,
+		...(speakerId ? { speakerId } : {}),
+		...(photoFileId ? { photoFileId } : {}),
 	});
 	await clearDialog(env.BOOK_CLUB_DB, chatId);
 	const claim = await getSpeakerClaim(env.BOOK_CLUB_DB, claimId);
 	if (claim) await notifyAdmin(env, claim);
-	return profile.fullName;
+	return fullName;
 }
 
 /** Нажатие на свободную тему плана: sclaim:<topicId>. */
@@ -166,7 +198,7 @@ export async function handleClaimCallback(env: Env, cb: TelegramCallbackQuery, d
 	}
 
 	// Вернувшийся спикер — имя/фото уже знаем, диалог не нужен.
-	const knownName = await finalizeIfKnownSpeaker(env, message.chat.id, claim.id);
+	const knownName = await finalizeIfKnownSpeaker(env, message.chat.id, claim.id, cb.from.username);
 	if (knownName) {
 		await editMessageText(
 			env.BOT_TOKEN,
@@ -241,7 +273,7 @@ export async function handleDialogMessage(env: Env, message: TelegramMessage): P
 		if (!claim) return true;
 
 		// Вернувшийся спикер — имя/фото уже знаем, диалог не нужен.
-		const knownName = await finalizeIfKnownSpeaker(env, chatId, claim.id);
+		const knownName = await finalizeIfKnownSpeaker(env, chatId, claim.id, message.from?.username);
 		if (knownName) {
 			await sendMessage(
 				env.BOT_TOKEN,

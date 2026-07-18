@@ -27,6 +27,8 @@ export interface SpeakerClaim {
 	username: string | null;
 	full_name: string | null;
 	photo_file_id: string | null;
+	/** id каталожного спикера (book-club-data), если заявитель узнан. */
+	speaker_id: string | null;
 	status: "pending" | "confirmed";
 	created_at: number;
 }
@@ -54,6 +56,7 @@ const SCHEMA = [
 		username TEXT,
 		full_name TEXT,
 		photo_file_id TEXT,
+		speaker_id TEXT,
 		status TEXT NOT NULL DEFAULT 'pending',
 		created_at INTEGER NOT NULL
 	)`,
@@ -120,10 +123,21 @@ const SCHEMA = [
 /** Композитный ключ прогресса карточки (уникален по всем книгам). */
 export const cardKey = (book: string, cardId: string): string => `${book}:${cardId}`;
 
+// Мягкие миграции для уже существующих таблиц (новые столбцы). ALTER падает,
+// если столбец уже есть — глотаем эту ошибку.
+const MIGRATIONS = [`ALTER TABLE speaker_claims ADD COLUMN speaker_id TEXT`];
+
 export async function ensureSchema(db: D1Database): Promise<void> {
 	if (schemaReady) return;
 	for (const sql of SCHEMA) {
 		await db.prepare(sql).run();
+	}
+	for (const sql of MIGRATIONS) {
+		try {
+			await db.prepare(sql).run();
+		} catch (err) {
+			if (!String(err).includes("duplicate column")) throw err;
+		}
 	}
 	schemaReady = true;
 }
@@ -180,28 +194,28 @@ export async function getSpeakerClaim(db: D1Database, id: number): Promise<Speak
 	return db.prepare("SELECT * FROM speaker_claims WHERE id = ?").bind(id).first<SpeakerClaim>();
 }
 
-/** Профиль спикера из прошлых заявок этого пользователя (имя + фото), если есть. */
+/** Профиль спикера из прошлых заявок этого пользователя (имя, фото, id), если есть. */
 export async function getSpeakerProfile(
 	db: D1Database,
 	chatId: number,
-): Promise<{ fullName: string; photoFileId: string | null } | null> {
+): Promise<{ fullName: string; photoFileId: string | null; speakerId: string | null } | null> {
 	await ensureSchema(db);
 	const row = await db
 		.prepare(
-			`SELECT full_name, photo_file_id FROM speaker_claims
+			`SELECT full_name, photo_file_id, speaker_id FROM speaker_claims
 			 WHERE chat_id = ? AND full_name IS NOT NULL AND full_name != ''
 			 ORDER BY created_at DESC LIMIT 1`,
 		)
 		.bind(chatId)
-		.first<{ full_name: string; photo_file_id: string | null }>();
+		.first<{ full_name: string; photo_file_id: string | null; speaker_id: string | null }>();
 	if (!row) return null;
-	return { fullName: row.full_name, photoFileId: row.photo_file_id };
+	return { fullName: row.full_name, photoFileId: row.photo_file_id, speakerId: row.speaker_id };
 }
 
 export async function updateSpeakerClaim(
 	db: D1Database,
 	id: number,
-	fields: { fullName?: string; photoFileId?: string; status?: "pending" | "confirmed" },
+	fields: { fullName?: string; photoFileId?: string; speakerId?: string; status?: "pending" | "confirmed" },
 ): Promise<void> {
 	await ensureSchema(db);
 	if (fields.fullName !== undefined) {
@@ -212,6 +226,9 @@ export async function updateSpeakerClaim(
 			.prepare("UPDATE speaker_claims SET photo_file_id = ? WHERE id = ?")
 			.bind(fields.photoFileId, id)
 			.run();
+	}
+	if (fields.speakerId !== undefined) {
+		await db.prepare("UPDATE speaker_claims SET speaker_id = ? WHERE id = ?").bind(fields.speakerId, id).run();
 	}
 	if (fields.status !== undefined) {
 		await db.prepare("UPDATE speaker_claims SET status = ? WHERE id = ?").bind(fields.status, id).run();

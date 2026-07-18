@@ -118,6 +118,13 @@ export interface ContentIndex {
 		chapters: string[];
 	}[];
 	events: string[];
+	speakers?: {
+		id: string;
+		name: string;
+		avatar?: string;
+		aliases?: string[];
+		socials?: Partial<Record<"telegram" | "github" | "linkedin" | "website", string>>;
+	}[];
 }
 
 // ── Хранилище (KV) ───────────────────────────────────────────────────────────

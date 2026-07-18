@@ -7,6 +7,7 @@ import worker from "../src/index";
 import type { Flashcard } from "../src/types";
 import { calculateNextReview, getDueCards } from "../src/lib/spaced-repetition";
 import { eventDateFromPath, eventPathById } from "../src/lib/events";
+import { findSpeakerByUsername, telegramHandle } from "../src/lib/speakers";
 import {
 	mintSession,
 	verifyInitData,
@@ -162,5 +163,37 @@ describe("getDueCards", () => {
 	it("соблюдает лимит", () => {
 		const due = getDueCards(cards, new Map(), Date.now(), 1);
 		expect(due).toHaveLength(1);
+	});
+});
+
+describe("Сопоставление спикера по Telegram", () => {
+	it("парсит хендл из ссылки, @ и голого ника", () => {
+		expect(telegramHandle("https://t.me/Pomazkov_Anton")).toBe("pomazkov_anton");
+		expect(telegramHandle("t.me/anton")).toBe("anton");
+		expect(telegramHandle("@Anton")).toBe("anton");
+		expect(telegramHandle("anton")).toBe("anton");
+	});
+
+	it("игнорирует инвайты и мусор", () => {
+		expect(telegramHandle("https://t.me/+AbCdEf12")).toBeNull();
+		expect(telegramHandle("https://t.me/joinchat/xxx")).toBeNull();
+		expect(telegramHandle("")).toBeNull();
+		expect(telegramHandle(undefined)).toBeNull();
+	});
+
+	it("находит спикера каталога по нику заявителя (без регистра)", () => {
+		const index = {
+			version: 1 as const,
+			active_book: "b",
+			books: [],
+			events: [],
+			speakers: [
+				{ id: "pomazkov-anton", name: "Антон Помазков", socials: { telegram: "https://t.me/anton_p" } },
+				{ id: "nikiforov-artem", name: "Артём Никифоров" },
+			],
+		};
+		expect(findSpeakerByUsername(index, "Anton_P")?.id).toBe("pomazkov-anton");
+		expect(findSpeakerByUsername(index, "unknown")).toBeNull();
+		expect(findSpeakerByUsername(index, undefined)).toBeNull();
 	});
 });

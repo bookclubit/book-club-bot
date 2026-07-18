@@ -156,6 +156,7 @@ async function handleClaimsApi(env: Env): Promise<Response> {
 			chapter: c.chapter,
 			status: c.status,
 			speaker: c.full_name ?? (c.username ? `@${c.username}` : "участник клуба"),
+			speaker_id: c.speaker_id,
 		})),
 	});
 }

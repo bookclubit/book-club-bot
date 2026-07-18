@@ -84,7 +84,7 @@ export interface ClosedChapterEvent extends EventBase {
 /** «Доклады» — чистовая запись докладов (стримы, без Meet). */
 export interface LiveTalkEvent extends EventBase {
 	type: "live-talk";
-	talks: { title: string; speaker: string; speaker_id?: string }[];
+	talks: { title: string; speaker: string; speaker_id?: string; topic_id?: string }[];
 	/** Книга и глава программы докладов. */
 	book_id?: string;
 	chapter?: string;

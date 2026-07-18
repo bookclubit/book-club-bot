@@ -53,28 +53,29 @@ export async function handleJoin(env: Env, message: TelegramMessage, eventId: st
 
 // ── Заявка спикера: выбор темы ───────────────────────────────────────────────
 
-function speakerKeyboard(topics: PlanTopic[], claims: SpeakerClaim[]): InlineKeyboardMarkup {
+// Свободные темы: не занятые заявкой (D1) и не назначенные админом в CMS.
+function freeTopics(topics: PlanTopic[], claims: SpeakerClaim[]): PlanTopic[] {
 	const taken = new Set(claims.filter((c) => c.topic_id).map((c) => c.topic_id));
-	const rows = topics.map((t) => [
-		taken.has(t.topic.id)
-			? { text: `🔒 ${t.topic.title}`, callback_data: `staken:${t.topic.id}` }
-			: { text: t.topic.title, callback_data: `sclaim:${t.topic.id}` },
-	]);
+	return topics.filter((t) => !t.takenByCms && !taken.has(t.topic.id));
+}
+
+function speakerKeyboard(free: PlanTopic[]): InlineKeyboardMarkup {
+	const rows = free.map((t) => [{ text: t.topic.title, callback_data: `sclaim:${t.topic.id}` }]);
 	rows.push([{ text: "💡 Предложить свою тему", callback_data: "scustom" }]);
 	return { inline_keyboard: rows };
 }
 
-function speakerIntro(topics: PlanTopic[]): string {
-	if (topics.length === 0) {
+function speakerIntro(free: PlanTopic[]): string {
+	if (free.length === 0) {
 		return (
 			"🎤 Хочешь выступить — отлично!\n\n" +
-			"Готовых тем в плане сейчас нет (или ближайшая встреча уже свёрстана) — предложи свою:"
+			"Свободных тем в плане сейчас нет — предложи свою:"
 		);
 	}
-	const books = [...new Set(topics.map((t) => t.bookTitle))].join(", ");
+	const books = [...new Set(free.map((t) => t.bookTitle))].join(", ");
 	return (
 		"🎤 Хочешь выступить — отлично!\n\n" +
-		`Темы из плана (${books}). 🔒 — уже заняты. На ближайшую встречу темы не выдаются — программа свёрстана.`
+		`Свободные темы из плана (${books}). На ближайшую встречу темы не выдаются — программа свёрстана.`
 	);
 }
 
@@ -83,7 +84,8 @@ export async function handleSpeaker(env: Env, message: TelegramMessage): Promise
 		fetchPlanTopics(),
 		listSpeakerClaims(env.BOOK_CLUB_DB),
 	]);
-	await sendMessage(env.BOT_TOKEN, message.chat.id, speakerIntro(topics), speakerKeyboard(topics, claims));
+	const free = freeTopics(topics, claims);
+	await sendMessage(env.BOT_TOKEN, message.chat.id, speakerIntro(free), speakerKeyboard(free));
 }
 
 /** Уведомление админу: только информирование + ссылка на модерацию в CMS. */
@@ -138,7 +140,7 @@ export async function handleClaimCallback(env: Env, cb: TelegramCallbackQuery, d
 			message.chat.id,
 			message.message_id,
 			"Эту тему только что заняли 🙈 Выбери другую:",
-			speakerKeyboard(topics, claims),
+			speakerKeyboard(freeTopics(topics, claims)),
 		);
 		await answerCallback(env.BOT_TOKEN, cb.id, "Тему только что заняли");
 		return;

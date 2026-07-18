@@ -1,6 +1,7 @@
 // /start — подписка на ежедневные карточки.
 
 import type { TelegramMessage } from "../types";
+import { upsertUser } from "../lib/db";
 import { saveSubscriber } from "../lib/storage";
 import { sendMessage } from "../lib/telegram";
 
@@ -27,6 +28,13 @@ export async function handleStart(env: Env, message: TelegramMessage): Promise<v
 		firstName: message.from?.first_name,
 		username: message.from?.username,
 		subscribedAt: Date.now(),
+	});
+
+	// Аккаунт платформы (единый прогресс карточек на боте и на сайте).
+	await upsertUser(env.BOOK_CLUB_DB, {
+		id: chatId,
+		username: message.from?.username ?? null,
+		firstName: message.from?.first_name ?? null,
 	});
 
 	console.log(`Новый подписчик: ${chatId} (@${message.from?.username ?? "—"})`);

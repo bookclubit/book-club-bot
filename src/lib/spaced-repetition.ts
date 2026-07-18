@@ -37,8 +37,20 @@ export function calculateNextReview(
 	grade: Grade,
 	now: number,
 ): CardProgress {
+	return reviewFromQuality(prev, GRADE_QUALITY[grade], now);
+}
+
+/**
+ * Расчёт SM-2 по числовому качеству ответа q (0–5) — общий для бота (3 оценки)
+ * и сайта (4 оценки: again/hard/good/easy). Позволяет считать интервалы
+ * одинаково независимо от источника оценки.
+ */
+export function reviewFromQuality(
+	prev: CardProgress | undefined,
+	quality: number,
+	now: number,
+): CardProgress {
 	const cardId = prev?.cardId ?? "";
-	const quality = GRADE_QUALITY[grade];
 	const base = prev ?? initialProgress(cardId, now);
 
 	// Обновление коэффициента лёгкости.

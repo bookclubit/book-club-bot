@@ -6,15 +6,28 @@
 
 import type { TelegramMessage, TelegramUpdate } from "./types";
 import { fetchEventByPath, fetchIndex } from "./lib/api";
+import {
+	mintSession,
+	verifyInitData,
+	verifyLoginWidget,
+	verifySession,
+	type TgUser,
+} from "./lib/auth";
 import { sendDueCards } from "./lib/cards";
 import {
 	deleteSpeakerClaim,
+	getCardProgress,
+	getCardProgressMap,
 	getSpeakerClaim,
+	getUser,
 	listRegistrations,
 	listSpeakerClaims,
 	markReminderSent,
+	saveCardProgress,
 	updateSpeakerClaim,
+	upsertUser,
 } from "./lib/db";
+import { reviewFromQuality } from "./lib/spaced-repetition";
 import { eventDateFromPath, eventStartMs, mskToday, renderEventLinks } from "./lib/events";
 import { listSubscribers } from "./lib/storage";
 import { getFileResponse, sendMessage, setMyCommands } from "./lib/telegram";
@@ -211,6 +224,99 @@ async function handleAdminSetup(env: Env): Promise<Response> {
 	return json({ ok: true, commands: BOT_COMMANDS.map((c) => c.command) });
 }
 
+// ── Платформа: вход через Telegram и единый прогресс карточек ─────────────────
+
+/** Оценка сайта (4 варианта) и бота → качество ответа q (0–5) в SM-2. */
+const PLATFORM_QUALITY: Record<string, number> = { again: 1, hard: 3, good: 4, easy: 5 };
+
+function publicUser(u: TgUser): Record<string, unknown> {
+	return {
+		id: u.id,
+		username: u.username ?? null,
+		first_name: u.first_name ?? null,
+		last_name: u.last_name ?? null,
+		photo_url: u.photo_url ?? null,
+	};
+}
+
+/** userId из подписанной сессии (заголовок Authorization: Bearer), иначе null. */
+async function authUser(env: Env, request: Request): Promise<number | null> {
+	const header = request.headers.get("authorization") ?? "";
+	if (!header.startsWith("Bearer ")) return null;
+	return verifySession(env.BOT_TOKEN, header.slice("Bearer ".length));
+}
+
+/**
+ * Вход через Telegram: POST /api/auth/telegram
+ * { initData } (Mini App) или { widget } (Login Widget). Проверяем подпись,
+ * заводим/обновляем аккаунт и выдаём сессию.
+ */
+async function handleAuthTelegram(env: Env, request: Request): Promise<Response> {
+	let body: { initData?: string; widget?: Record<string, string> };
+	try {
+		body = (await request.json()) as typeof body;
+	} catch {
+		return json({ error: "невалидный JSON" }, 400);
+	}
+
+	let user: TgUser | null = null;
+	if (body.initData) user = await verifyInitData(env.BOT_TOKEN, body.initData);
+	else if (body.widget) user = await verifyLoginWidget(env.BOT_TOKEN, body.widget);
+	if (!user) return json({ error: "подпись Telegram не прошла проверку" }, 401);
+
+	await upsertUser(env.BOOK_CLUB_DB, {
+		id: user.id,
+		username: user.username ?? null,
+		firstName: user.first_name ?? null,
+		lastName: user.last_name ?? null,
+		photoUrl: user.photo_url ?? null,
+	});
+	const token = await mintSession(env.BOT_TOKEN, user.id);
+	return json({ token, user: publicUser(user) });
+}
+
+/** Профиль текущего пользователя: GET /api/me. */
+async function handleMe(env: Env, userId: number): Promise<Response> {
+	const user = await getUser(env.BOOK_CLUB_DB, userId);
+	if (!user) return json({ error: "аккаунт не найден" }, 404);
+	return json({ user });
+}
+
+/** Весь прогресс пользователя (для сайта): GET /api/progress. */
+async function handleProgress(env: Env, userId: number): Promise<Response> {
+	const map = await getCardProgressMap(env.BOOK_CLUB_DB, userId);
+	return json({ progress: [...map.values()] });
+}
+
+/** Оценка карточки: POST /api/review { card_id, book_id, grade }. */
+async function handleReview(env: Env, userId: number, request: Request): Promise<Response> {
+	let body: { card_id?: string; book_id?: string; grade?: string };
+	try {
+		body = (await request.json()) as typeof body;
+	} catch {
+		return json({ error: "невалидный JSON" }, 400);
+	}
+	const cardId = body.card_id;
+	const grade = body.grade;
+	if (!cardId || !grade || !(grade in PLATFORM_QUALITY)) {
+		return json({ error: "нужны card_id и grade (again|hard|good|easy)" }, 400);
+	}
+
+	const now = Date.now();
+	const prev =
+		(await getCardProgress(env.BOOK_CLUB_DB, userId, cardId)) ?? {
+			cardId,
+			repetition: 0,
+			interval: 0,
+			easiness: 2.5,
+			dueDate: now,
+			lastReviewed: 0,
+		};
+	const next = reviewFromQuality(prev, PLATFORM_QUALITY[grade], now);
+	await saveCardProgress(env.BOOK_CLUB_DB, userId, body.book_id ?? "", next);
+	return json({ progress: next });
+}
+
 async function handleApi(env: Env, request: Request, url: URL): Promise<Response> {
 	if (request.method === "OPTIONS") {
 		return new Response(null, { status: 204, headers: CORS_HEADERS });
@@ -218,6 +324,27 @@ async function handleApi(env: Env, request: Request, url: URL): Promise<Response
 	if (url.pathname === "/api/claims" && request.method === "GET") {
 		return handleClaimsApi(env);
 	}
+
+	// Платформа: вход и единый прогресс карточек (сессия из Telegram-подписи).
+	if (url.pathname === "/api/auth/telegram" && request.method === "POST") {
+		return handleAuthTelegram(env, request);
+	}
+	if (
+		url.pathname === "/api/me" ||
+		url.pathname === "/api/progress" ||
+		url.pathname === "/api/review"
+	) {
+		const userId = await authUser(env, request);
+		if (userId === null) return json({ error: "нужен вход через Telegram" }, 401);
+		if (url.pathname === "/api/me" && request.method === "GET") return handleMe(env, userId);
+		if (url.pathname === "/api/progress" && request.method === "GET") {
+			return handleProgress(env, userId);
+		}
+		if (url.pathname === "/api/review" && request.method === "POST") {
+			return handleReview(env, userId, request);
+		}
+	}
+
 	if (url.pathname.startsWith("/api/admin/")) {
 		if (!isAdmin(env, request)) return json({ error: "нужен админ-токен" }, 401);
 		if (url.pathname === "/api/admin/claims" && request.method === "GET") {

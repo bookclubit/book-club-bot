@@ -1,6 +1,20 @@
-// D1: заявки спикеров, записи на встречи, шаги диалога, флаги напоминаний.
+// D1: заявки спикеров, записи на встречи, шаги диалога, флаги напоминаний,
+// аккаунты платформы и единый прогресс карточек (SM-2) — общий для бота и сайта.
 // Оперативное состояние клуба живёт здесь (мгновенность и атомарность),
 // контент — в git (book-club-data).
+
+import type { CardProgress } from "../types";
+
+/** Аккаунт платформы = пользователь Telegram (id = chat_id в личке). */
+export interface DbUser {
+	id: number;
+	username: string | null;
+	first_name: string | null;
+	last_name: string | null;
+	photo_url: string | null;
+	created_at: number;
+	updated_at: number;
+}
 
 /** Заявка на доклад. topic_id = null — «своя тема» вне плана. */
 export interface SpeakerClaim {
@@ -64,6 +78,28 @@ const SCHEMA = [
 		event_id TEXT NOT NULL,
 		kind TEXT NOT NULL,
 		PRIMARY KEY (event_id, kind)
+	)`,
+	// Аккаунты платформы (Telegram-пользователи).
+	`CREATE TABLE IF NOT EXISTS users (
+		id INTEGER PRIMARY KEY,
+		username TEXT,
+		first_name TEXT,
+		last_name TEXT,
+		photo_url TEXT,
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL
+	)`,
+	// Единый прогресс карточек (SM-2): общий для бота и сайта, ключ — Telegram id.
+	`CREATE TABLE IF NOT EXISTS card_progress (
+		user_id INTEGER NOT NULL,
+		card_id TEXT NOT NULL,
+		book_id TEXT,
+		repetition INTEGER NOT NULL,
+		interval INTEGER NOT NULL,
+		easiness REAL NOT NULL,
+		due_date INTEGER NOT NULL,
+		last_reviewed INTEGER NOT NULL,
+		PRIMARY KEY (user_id, card_id)
 	)`,
 ];
 
@@ -223,4 +259,128 @@ export async function markReminderSent(
 		.bind(eventId, kind)
 		.run();
 	return (result.meta.changes ?? 0) > 0;
+}
+
+// ── Аккаунты платформы ───────────────────────────────────────────────────────
+
+/** Создаёт/обновляет пользователя (профиль из Telegram). */
+export async function upsertUser(
+	db: D1Database,
+	user: {
+		id: number;
+		username?: string | null;
+		firstName?: string | null;
+		lastName?: string | null;
+		photoUrl?: string | null;
+	},
+): Promise<void> {
+	await ensureSchema(db);
+	const now = Date.now();
+	await db
+		.prepare(
+			`INSERT INTO users (id, username, first_name, last_name, photo_url, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET
+				username = excluded.username,
+				first_name = excluded.first_name,
+				last_name = excluded.last_name,
+				photo_url = excluded.photo_url,
+				updated_at = excluded.updated_at`,
+		)
+		.bind(
+			user.id,
+			user.username ?? null,
+			user.firstName ?? null,
+			user.lastName ?? null,
+			user.photoUrl ?? null,
+			now,
+			now,
+		)
+		.run();
+}
+
+export async function getUser(db: D1Database, id: number): Promise<DbUser | null> {
+	await ensureSchema(db);
+	return db.prepare("SELECT * FROM users WHERE id = ?").bind(id).first<DbUser>();
+}
+
+// ── Единый прогресс карточек (SM-2) ──────────────────────────────────────────
+
+interface CardProgressRow {
+	card_id: string;
+	repetition: number;
+	interval: number;
+	easiness: number;
+	due_date: number;
+	last_reviewed: number;
+}
+
+const rowToProgress = (r: CardProgressRow): CardProgress => ({
+	cardId: r.card_id,
+	repetition: r.repetition,
+	interval: r.interval,
+	easiness: r.easiness,
+	dueDate: r.due_date,
+	lastReviewed: r.last_reviewed,
+});
+
+export async function getCardProgress(
+	db: D1Database,
+	userId: number,
+	cardId: string,
+): Promise<CardProgress | null> {
+	await ensureSchema(db);
+	const row = await db
+		.prepare("SELECT * FROM card_progress WHERE user_id = ? AND card_id = ?")
+		.bind(userId, cardId)
+		.first<CardProgressRow>();
+	return row ? rowToProgress(row) : null;
+}
+
+/** Весь прогресс пользователя: map cardId → прогресс. */
+export async function getCardProgressMap(
+	db: D1Database,
+	userId: number,
+): Promise<Map<string, CardProgress>> {
+	await ensureSchema(db);
+	const { results } = await db
+		.prepare("SELECT * FROM card_progress WHERE user_id = ?")
+		.bind(userId)
+		.all<CardProgressRow>();
+	const map = new Map<string, CardProgress>();
+	for (const r of results) map.set(r.card_id, rowToProgress(r));
+	return map;
+}
+
+export async function saveCardProgress(
+	db: D1Database,
+	userId: number,
+	bookId: string,
+	progress: CardProgress,
+): Promise<void> {
+	await ensureSchema(db);
+	await db
+		.prepare(
+			`INSERT INTO card_progress
+				(user_id, card_id, book_id, repetition, interval, easiness, due_date, last_reviewed)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(user_id, card_id) DO UPDATE SET
+				book_id = excluded.book_id,
+				repetition = excluded.repetition,
+				interval = excluded.interval,
+				easiness = excluded.easiness,
+				due_date = excluded.due_date,
+				last_reviewed = excluded.last_reviewed`,
+		)
+		.bind(
+			userId,
+			progress.cardId,
+			bookId,
+			progress.repetition,
+			progress.interval,
+			progress.easiness,
+			progress.dueDate,
+			progress.lastReviewed,
+		)
+		.run();
 }

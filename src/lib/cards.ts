@@ -3,8 +3,8 @@
 import type { Flashcard, Grade, InlineKeyboardMarkup } from "../types";
 import { BOOK_ID } from "../types";
 import { fetchFlashcards } from "./api";
+import { getCardProgressMap } from "./db";
 import { getDueCards } from "./spaced-repetition";
-import { getProgressMap } from "./storage";
 import { sendMessage } from "./telegram";
 
 /** Сколько карточек отправляем за один заход. */
@@ -97,7 +97,7 @@ export async function sendDueCards(
 
 	const [cards, progress] = await Promise.all([
 		fetchFlashcards(BOOK_ID),
-		getProgressMap(env.BOOK_CLUB_KV, chatId),
+		getCardProgressMap(env.BOOK_CLUB_DB, chatId),
 	]);
 
 	const now = Date.now();

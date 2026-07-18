@@ -3,7 +3,7 @@
 import type { TelegramMessage } from "../types";
 import { BOOK_ID } from "../types";
 import { fetchFlashcards } from "../lib/api";
-import { getProgressMap } from "../lib/storage";
+import { getCardProgressMap } from "../lib/db";
 import { sendMessage } from "../lib/telegram";
 
 export async function handleStatus(env: Env, message: TelegramMessage): Promise<void> {
@@ -11,7 +11,7 @@ export async function handleStatus(env: Env, message: TelegramMessage): Promise<
 
 	const [cards, progress] = await Promise.all([
 		fetchFlashcards(BOOK_ID),
-		getProgressMap(env.BOOK_CLUB_KV, chatId),
+		getCardProgressMap(env.BOOK_CLUB_DB, chatId),
 	]);
 
 	const now = Date.now();

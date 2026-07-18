@@ -4,8 +4,8 @@ import type { Grade, TelegramCallbackQuery } from "../types";
 import { BOOK_ID } from "../types";
 import { fetchFlashcards } from "../lib/api";
 import { gradeKeyboard, renderBack } from "../lib/cards";
+import { getCardProgress, saveCardProgress } from "../lib/db";
 import { calculateNextReview } from "../lib/spaced-repetition";
-import { getProgress, saveProgress } from "../lib/storage";
 import { answerCallback, editMessageText } from "../lib/telegram";
 import {
 	handleClaimCallback,
@@ -84,7 +84,7 @@ export async function handleCallback(env: Env, cb: TelegramCallbackQuery): Promi
 		}
 
 		const now = Date.now();
-		const prev = (await getProgress(env.BOOK_CLUB_KV, chatId, cardId)) ?? undefined;
+		const prev = (await getCardProgress(env.BOOK_CLUB_DB, chatId, cardId)) ?? undefined;
 		const prevWithId = prev ?? {
 			cardId,
 			repetition: 0,
@@ -94,7 +94,7 @@ export async function handleCallback(env: Env, cb: TelegramCallbackQuery): Promi
 			lastReviewed: 0,
 		};
 		const next = calculateNextReview(prevWithId, grade, now);
-		await saveProgress(env.BOOK_CLUB_KV, chatId, next);
+		await saveCardProgress(env.BOOK_CLUB_DB, chatId, BOOK_ID, next);
 
 		const days = next.interval;
 		const nextLine = `\n\n✅ <i>Оценка сохранена. Следующее повторение через ${days} ${pluralizeDays(days)}.</i>`;

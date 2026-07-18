@@ -7,6 +7,12 @@ import worker from "../src/index";
 import type { Flashcard } from "../src/types";
 import { calculateNextReview, getDueCards } from "../src/lib/spaced-repetition";
 import { eventDateFromPath, eventPathById } from "../src/lib/events";
+import {
+	mintSession,
+	verifyInitData,
+	verifyLoginWidget,
+	verifySession,
+} from "../src/lib/auth";
 
 const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
 
@@ -67,6 +73,78 @@ describe("SM-2 calculateNextReview", () => {
 		let p = calculateNextReview(undefined, "again", now);
 		for (let i = 0; i < 10; i++) p = calculateNextReview(p, "again", now);
 		expect(p.easiness).toBeGreaterThanOrEqual(1.3);
+	});
+});
+
+describe("Telegram-аутентификация", () => {
+	const TOKEN = "123456:test-bot-token";
+	const enc = new TextEncoder();
+	const hex = (b: ArrayBuffer) =>
+		[...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, "0")).join("");
+
+	async function hmacHex(keyRaw: Uint8Array, msg: string): Promise<string> {
+		const key = await crypto.subtle.importKey(
+			"raw",
+			keyRaw as BufferSource,
+			{ name: "HMAC", hash: "SHA-256" },
+			false,
+			["sign"],
+		);
+		return hex(await crypto.subtle.sign("HMAC", key, enc.encode(msg)));
+	}
+	const sha256 = async (msg: string) =>
+		new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(msg)));
+
+	it("сессия: round-trip и отклонение подделки", async () => {
+		const token = await mintSession(TOKEN, 777);
+		expect(await verifySession(TOKEN, token)).toBe(777);
+		expect(await verifySession(TOKEN, token + "x")).toBeNull();
+		expect(await verifySession(TOKEN, "1.2.3")).toBeNull();
+	});
+
+	it("Login Widget: валидная подпись проходит, битая — нет", async () => {
+		const now = Math.floor(Date.now() / 1000);
+		const data: Record<string, string> = {
+			id: "42",
+			first_name: "Аня",
+			username: "anya",
+			auth_date: String(now),
+		};
+		const checkString = Object.keys(data)
+			.sort()
+			.map((k) => `${k}=${data[k]}`)
+			.join("\n");
+		data.hash = await hmacHex(await sha256(TOKEN), checkString);
+
+		const user = await verifyLoginWidget(TOKEN, data);
+		expect(user?.id).toBe(42);
+
+		expect(await verifyLoginWidget(TOKEN, { ...data, hash: "deadbeef" })).toBeNull();
+		expect(await verifyLoginWidget(TOKEN, { ...data, first_name: "Взлом" })).toBeNull();
+	});
+
+	it("Mini App initData: валидная подпись проходит", async () => {
+		const now = Math.floor(Date.now() / 1000);
+		const user = JSON.stringify({ id: 99, first_name: "Боб" });
+		const pairs = { auth_date: String(now), user };
+		const checkString = Object.entries(pairs)
+			.map(([k, v]) => `${k}=${v}`)
+			.sort()
+			.join("\n");
+		const secret = await crypto.subtle.importKey(
+			"raw",
+			enc.encode("WebAppData") as BufferSource,
+			{ name: "HMAC", hash: "SHA-256" },
+			false,
+			["sign"],
+		);
+		const secretRaw = new Uint8Array(await crypto.subtle.sign("HMAC", secret, enc.encode(TOKEN)));
+		const hash = await hmacHex(secretRaw, checkString);
+		const initData = new URLSearchParams({ ...pairs, hash }).toString();
+
+		const result = await verifyInitData(TOKEN, initData);
+		expect(result?.id).toBe(99);
+		expect(await verifyInitData(TOKEN, initData + "x")).toBeNull();
 	});
 });
 

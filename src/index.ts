@@ -182,7 +182,8 @@ function talkReadyMessage(slides: string): string {
 	} catch {
 		branch = "";
 	}
-	const prLink = branch ? `${TALKS_REPO}/pulls?q=is%3Apr+head%3A${branch}` : `${TALKS_REPO}/pulls`;
+	// is%3Aopen — только актуальный открытый PR ветки (закрытые дубли не путают).
+	const prLink = branch ? `${TALKS_REPO}/pulls?q=is%3Apr+is%3Aopen+head%3A${branch}` : `${TALKS_REPO}/pulls`;
 	return (
 		"🎤 Готовлю твою презентацию!\n\n" +
 		"Через минуту здесь появится черновик — pull request с шаблоном по твоей теме:\n" +

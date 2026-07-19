@@ -174,28 +174,36 @@ async function handleAdminClaims(env: Env): Promise<Response> {
 
 const TALKS_REPO = "https://github.com/bookclubit/book-club-talks";
 
-/** Сообщение спикеру о старте генерации презентации: PR-ветка + инструкция. */
+/** Сообщение спикеру о старте генерации презентации: PR + превью + инструкция. */
 function talkReadyMessage(slides: string): string {
 	let branch = "";
+	let previewUrl = "";
 	try {
-		branch = new URL(slides).hostname.split(".")[0].toUpperCase();
+		const host = new URL(slides).hostname; // bc-114-ai-1-pomazkov.pages.dev
+		branch = host.split(".")[0].toUpperCase();
+		previewUrl = `https://preview.${host}`; // детерминированный адрес превью
 	} catch {
 		branch = "";
 	}
 	// is%3Aopen — только актуальный открытый PR ветки (закрытые дубли не путают).
 	const prLink = branch ? `${TALKS_REPO}/pulls?q=is%3Apr+is%3Aopen+head%3A${branch}` : `${TALKS_REPO}/pulls`;
+	const preview = previewUrl
+		? `\n👀 <b>Живое превью</b> (поднимется через минуту, обновляется на каждый твой пуш):\n<a href="${previewUrl}">${previewUrl}</a>\n`
+		: "";
 	return (
-		"🎤 Готовлю твою презентацию!\n\n" +
-		"Через минуту здесь появится черновик — pull request с шаблоном по твоей теме:\n" +
-		`${prLink}\n\n` +
-		"<b>Как сделать презентацию:</b>\n" +
-		`1. Открой PR по ссылке выше и склонируй его ветку:\n` +
-		`<code>git clone -b ${branch} ${TALKS_REPO}.git</code>\n` +
-		`2. Правь слайды в папке <code>talks/${branch}/</code> — файл <code>index.html</code>.\n` +
-		"3. <code>git push</code> — превью в PR обновится само.\n" +
-		"4. Готово? Напиши админу — он смёржит, и слайды откроются на:\n" +
-		`${slides}\n\n` +
-		`Шаблон и подробности: ${TALKS_REPO}#readme`
+		"🎤 <b>Ура, твоя тема в программе!</b>\n\n" +
+		"Я уже собрал стартовый шаблон презентации — дальше он полностью твой. " +
+		"Не переживай, ничего сложного, всё по шагам 👇\n\n" +
+		`📄 <b>Черновик доклада</b> (pull request):\n<a href="${prLink}">открыть на GitHub</a>\n` +
+		preview +
+		"\n<b>Как собрать презентацию:</b>\n" +
+		`1️⃣ Склонируй ветку черновика:\n<code>git clone -b ${branch} ${TALKS_REPO}.git</code>\n` +
+		`2️⃣ Правь слайды в <code>talks/${branch}/index.html</code>\n` +
+		"3️⃣ <code>git push</code> — превью обновится само, можно сразу смотреть\n" +
+		"4️⃣ Готово? Напиши админу — он смёржит, и доклад встанет на боевую ссылку:\n" +
+		`<a href="${slides}">${slides}</a>\n\n` +
+		`📚 Шаблон и подсказки: <a href="${TALKS_REPO}#readme">README</a>\n\n` +
+		"Если что-то непонятно — просто напиши, помогу 💛"
 	);
 }
 

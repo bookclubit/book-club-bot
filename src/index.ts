@@ -188,7 +188,7 @@ function talkReadyMessage(slides: string): string {
 	// is%3Aopen — только актуальный открытый PR ветки (закрытые дубли не путают).
 	const prLink = branch ? `${TALKS_REPO}/pulls?q=is%3Apr+is%3Aopen+head%3A${branch}` : `${TALKS_REPO}/pulls`;
 	const preview = previewUrl
-		? `\n👀 <b>Живое превью</b> (поднимется через минуту, обновляется на каждый твой пуш):\n<a href="${previewUrl}">${previewUrl}</a>\n`
+		? `\n👀 <b>Живое превью</b> (для нового доклада поднимется за пару минут, дальше обновляется на каждый твой пуш):\n<a href="${previewUrl}">${previewUrl}</a>\n`
 		: "";
 	return (
 		"🎤 <b>Ура, твоя тема в программе!</b>\n\n" +

@@ -8,7 +8,16 @@ import type { Flashcard } from "../src/types";
 import { calculateNextReview, getDueCards } from "../src/lib/spaced-repetition";
 import { eventDateFromPath, eventPathById } from "../src/lib/events";
 import { findSpeakerByUsername, telegramHandle } from "../src/lib/speakers";
-import { assignClaim, listSpeakerClaims, releaseClaimByTopic, setClaimSlides } from "../src/lib/db";
+import {
+	assignClaim,
+	createSpeakerClaim,
+	deleteSpeakerClaim,
+	getSpeakerProfile,
+	listSpeakerClaims,
+	releaseClaimByTopic,
+	saveSpeakerIdentity,
+	setClaimSlides,
+} from "../src/lib/db";
 import {
 	mintSession,
 	verifyInitData,
@@ -239,5 +248,33 @@ describe("Единый источник занятости: заявки из CM
 		await releaseClaimByTopic(db, topic);
 		const gone = (await listSpeakerClaims(db)).find((x) => x.topic_id === topic);
 		expect(gone).toBeUndefined();
+
+		// ── Устойчивая личность спикера (переживает удаление заявок) ──────────────
+		const chatId = 555000111;
+
+		// Знакомство запоминается устойчиво; частичное обновление не затирает (COALESCE).
+		await saveSpeakerIdentity(db, {
+			chatId,
+			fullName: "Пётр Тестовый",
+			speakerId: "petrov-test",
+			username: "petrov",
+		});
+		await saveSpeakerIdentity(db, { chatId, photoFileId: "photo-xyz" });
+
+		// Берёт тему и её тут же отклоняют (заявка удаляется).
+		const claim = await createSpeakerClaim(db, {
+			topicId: null,
+			topicTitle: "Своя тема",
+			chatId,
+			username: "petrov",
+		});
+		expect(claim).toBeTruthy();
+		if (claim) await deleteSpeakerClaim(db, claim.id);
+
+		// Профиль всё равно доступен — бот узнает вернувшегося спикера.
+		const profile = await getSpeakerProfile(db, chatId);
+		expect(profile?.fullName).toBe("Пётр Тестовый");
+		expect(profile?.speakerId).toBe("petrov-test");
+		expect(profile?.photoFileId).toBe("photo-xyz");
 	});
 });

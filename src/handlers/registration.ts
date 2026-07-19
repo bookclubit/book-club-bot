@@ -17,6 +17,7 @@ import {
 	getSpeakerClaim,
 	getSpeakerProfile,
 	listSpeakerClaims,
+	saveSpeakerIdentity,
 	setDialog,
 	updateSpeakerClaim,
 	type SpeakerClaim,
@@ -153,6 +154,8 @@ async function finalizeIfKnownSpeaker(
 		...(speakerId ? { speakerId } : {}),
 		...(photoFileId ? { photoFileId } : {}),
 	});
+	// Запоминаем личность устойчиво — переживёт удаление заявок при отклонении.
+	await saveSpeakerIdentity(env.BOOK_CLUB_DB, { chatId, fullName, speakerId, photoFileId, username });
 	await clearDialog(env.BOOK_CLUB_DB, chatId);
 	const claim = await getSpeakerClaim(env.BOOK_CLUB_DB, claimId);
 	if (claim) await notifyAdmin(env, claim);
@@ -365,6 +368,11 @@ export async function handleDialogMessage(env: Env, message: TelegramMessage): P
 		if (dialog.claim_id !== null) {
 			await updateSpeakerClaim(env.BOOK_CLUB_DB, dialog.claim_id, { fullName: text });
 		}
+		await saveSpeakerIdentity(env.BOOK_CLUB_DB, {
+			chatId,
+			fullName: text,
+			username: message.from?.username,
+		});
 		await setDialog(env.BOOK_CLUB_DB, chatId, "photo", dialog.claim_id);
 		await sendMessage(
 			env.BOT_TOKEN,
@@ -380,6 +388,9 @@ export async function handleDialogMessage(env: Env, message: TelegramMessage): P
 		if (!photo && text !== "/skip") return false;
 		if (photo && dialog.claim_id !== null) {
 			await updateSpeakerClaim(env.BOOK_CLUB_DB, dialog.claim_id, { photoFileId: photo.file_id });
+		}
+		if (photo) {
+			await saveSpeakerIdentity(env.BOOK_CLUB_DB, { chatId, photoFileId: photo.file_id });
 		}
 		await clearDialog(env.BOOK_CLUB_DB, chatId);
 

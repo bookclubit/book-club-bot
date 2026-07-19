@@ -72,6 +72,17 @@ const SCHEMA = [
 		claim_id INTEGER,
 		updated_at INTEGER NOT NULL
 	)`,
+	// Устойчивая личность спикера: chat_id → имя/фото/каталожный id. Пишется при
+	// узнавании и знакомстве, НЕ удаляется при отклонении темы (в отличие от
+	// speaker_claims) — чтобы бот не «забывал» вернувшегося спикера.
+	`CREATE TABLE IF NOT EXISTS speaker_identity (
+		chat_id INTEGER PRIMARY KEY,
+		speaker_id TEXT,
+		full_name TEXT,
+		photo_file_id TEXT,
+		username TEXT,
+		updated_at INTEGER NOT NULL
+	)`,
 	`CREATE TABLE IF NOT EXISTS registrations (
 		event_id TEXT NOT NULL,
 		chat_id INTEGER NOT NULL,
@@ -206,20 +217,70 @@ export async function getClaimByTopic(db: D1Database, topicId: string): Promise<
 	return db.prepare("SELECT * FROM speaker_claims WHERE topic_id = ?").bind(topicId).first<SpeakerClaim>();
 }
 
-/** Профиль спикера из прошлых заявок этого пользователя (имя, фото, id), если есть. */
+/**
+ * Запоминает личность спикера (устойчиво, переживает удаление заявок).
+ * COALESCE — не затираем уже известное имя/фото/id, если в этот раз их нет.
+ */
+export async function saveSpeakerIdentity(
+	db: D1Database,
+	identity: {
+		chatId: number;
+		fullName?: string | null;
+		photoFileId?: string | null;
+		speakerId?: string | null;
+		username?: string | null;
+	},
+): Promise<void> {
+	if (!identity.chatId) return; // chat_id=0 — заявка не от Telegram (назначена в CMS).
+	await ensureSchema(db);
+	await db
+		.prepare(
+			`INSERT INTO speaker_identity (chat_id, speaker_id, full_name, photo_file_id, username, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(chat_id) DO UPDATE SET
+				speaker_id = COALESCE(excluded.speaker_id, speaker_identity.speaker_id),
+				full_name = COALESCE(excluded.full_name, speaker_identity.full_name),
+				photo_file_id = COALESCE(excluded.photo_file_id, speaker_identity.photo_file_id),
+				username = COALESCE(excluded.username, speaker_identity.username),
+				updated_at = excluded.updated_at`,
+		)
+		.bind(
+			identity.chatId,
+			identity.speakerId ?? null,
+			identity.fullName ?? null,
+			identity.photoFileId ?? null,
+			identity.username ?? null,
+			Date.now(),
+		)
+		.run();
+}
+
+/**
+ * Профиль вернувшегося спикера (имя, фото, id). Источник — устойчивая
+ * таблица speaker_identity; фолбэк на прошлые заявки (легаси до её появления).
+ */
 export async function getSpeakerProfile(
 	db: D1Database,
 	chatId: number,
 ): Promise<{ fullName: string; photoFileId: string | null; speakerId: string | null } | null> {
 	await ensureSchema(db);
-	const row = await db
+	const id = await db
 		.prepare(
-			`SELECT full_name, photo_file_id, speaker_id FROM speaker_claims
-			 WHERE chat_id = ? AND full_name IS NOT NULL AND full_name != ''
-			 ORDER BY created_at DESC LIMIT 1`,
+			`SELECT full_name, photo_file_id, speaker_id FROM speaker_identity
+			 WHERE chat_id = ? AND full_name IS NOT NULL AND full_name != ''`,
 		)
 		.bind(chatId)
 		.first<{ full_name: string; photo_file_id: string | null; speaker_id: string | null }>();
+	const row =
+		id ??
+		(await db
+			.prepare(
+				`SELECT full_name, photo_file_id, speaker_id FROM speaker_claims
+				 WHERE chat_id = ? AND full_name IS NOT NULL AND full_name != ''
+				 ORDER BY created_at DESC LIMIT 1`,
+			)
+			.bind(chatId)
+			.first<{ full_name: string; photo_file_id: string | null; speaker_id: string | null }>());
 	if (!row) return null;
 	return { fullName: row.full_name, photoFileId: row.photo_file_id, speakerId: row.speaker_id };
 }

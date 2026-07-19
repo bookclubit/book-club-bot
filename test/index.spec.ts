@@ -8,6 +8,7 @@ import type { Flashcard } from "../src/types";
 import { calculateNextReview, getDueCards } from "../src/lib/spaced-repetition";
 import { eventDateFromPath, eventPathById } from "../src/lib/events";
 import { findSpeakerByUsername, telegramHandle } from "../src/lib/speakers";
+import { assignClaim, listSpeakerClaims, releaseClaimByTopic, setClaimSlides } from "../src/lib/db";
 import {
 	mintSession,
 	verifyInitData,
@@ -195,5 +196,48 @@ describe("Сопоставление спикера по Telegram", () => {
 		expect(findSpeakerByUsername(index, "Anton_P")?.id).toBe("pomazkov-anton");
 		expect(findSpeakerByUsername(index, "unknown")).toBeNull();
 		expect(findSpeakerByUsername(index, undefined)).toBeNull();
+	});
+});
+
+describe("Единый источник занятости: заявки из CMS (D1)", () => {
+	it("assign создаёт подтверждённую заявку, slides проставляет, release освобождает", async () => {
+		const db = env.BOOK_CLUB_DB;
+		const topic = "test-topic-single-source";
+		await releaseClaimByTopic(db, topic);
+
+		await assignClaim(db, {
+			topicId: topic,
+			topicTitle: "Тестовая тема",
+			bookId: "test-book",
+			chapter: "01-test",
+			speakerId: "sp-test",
+			speakerName: "Спикер Тестовый",
+		});
+		let c = (await listSpeakerClaims(db)).find((x) => x.topic_id === topic);
+		expect(c).toBeTruthy();
+		expect(c?.status).toBe("confirmed");
+		expect(c?.speaker_id).toBe("sp-test");
+		expect(c?.full_name).toBe("Спикер Тестовый");
+
+		await setClaimSlides(db, topic, "https://bc-1-test.pages.dev");
+		c = (await listSpeakerClaims(db)).find((x) => x.topic_id === topic);
+		expect(c?.slides_url).toBe("https://bc-1-test.pages.dev");
+
+		// Повторный assign заменяет спикера, тема остаётся одна.
+		await assignClaim(db, {
+			topicId: topic,
+			topicTitle: "Тестовая тема",
+			bookId: "test-book",
+			chapter: "01-test",
+			speakerId: "sp-other",
+			speakerName: "Другой Спикер",
+		});
+		const dupes = (await listSpeakerClaims(db)).filter((x) => x.topic_id === topic);
+		expect(dupes).toHaveLength(1);
+		expect(dupes[0].speaker_id).toBe("sp-other");
+
+		await releaseClaimByTopic(db, topic);
+		const gone = (await listSpeakerClaims(db)).find((x) => x.topic_id === topic);
+		expect(gone).toBeUndefined();
 	});
 });

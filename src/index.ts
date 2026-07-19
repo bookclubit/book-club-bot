@@ -14,6 +14,7 @@ import {
 	type TgUser,
 } from "./lib/auth";
 import {
+	assignClaim,
 	cardKey,
 	DAILY_CARD_OPTIONS,
 	deleteSpeakerClaim,
@@ -25,7 +26,9 @@ import {
 	listRegistrations,
 	listSpeakerClaims,
 	markReminderSent,
+	releaseClaimByTopic,
 	saveCardProgress,
+	setClaimSlides,
 	setDailyCards,
 	updateSpeakerClaim,
 	upsertUser,
@@ -157,6 +160,7 @@ async function handleClaimsApi(env: Env): Promise<Response> {
 			status: c.status,
 			speaker: c.full_name ?? (c.username ? `@${c.username}` : "участник клуба"),
 			speaker_id: c.speaker_id,
+			slides_url: c.slides_url,
 		})),
 	});
 }
@@ -168,40 +172,86 @@ async function handleAdminClaims(env: Env): Promise<Response> {
 }
 
 /**
- * Решение по заявке из CMS: POST /api/admin/claims
- * { id, action: "confirm" | "decline" }. Бот уведомляет спикера.
+ * Управление заявками из CMS: POST /api/admin/claims. Единый источник занятости —
+ * D1, поэтому CMS назначает/освобождает темы теми же заявками, что и бот.
+ *   { action: "confirm"|"decline", id }                      — модерация (по id заявки)
+ *   { action: "assign", topic_id, topic_title, book_id, chapter, speaker_id, speaker_name }
+ *   { action: "release", topic_id }                          — освободить тему
+ *   { action: "slides", topic_id, slides_url }               — ссылка на презентацию
  */
 async function handleAdminDecision(env: Env, request: Request): Promise<Response> {
-	let body: { id?: number; action?: string };
+	let body: {
+		id?: number;
+		action?: string;
+		topic_id?: string;
+		topic_title?: string;
+		book_id?: string;
+		chapter?: string;
+		speaker_id?: string;
+		speaker_name?: string;
+		slides_url?: string;
+	};
 	try {
-		body = (await request.json()) as { id?: number; action?: string };
+		body = (await request.json()) as typeof body;
 	} catch {
 		return json({ error: "невалидный JSON" }, 400);
 	}
+
+	// Назначение/освобождение/слайды из CMS — по topic_id, без Telegram-уведомления.
+	if (body.action === "assign") {
+		if (!body.topic_id || !body.topic_title || !body.book_id || !body.chapter || !body.speaker_id || !body.speaker_name) {
+			return json({ error: "нужны topic_id, topic_title, book_id, chapter, speaker_id, speaker_name" }, 400);
+		}
+		await assignClaim(env.BOOK_CLUB_DB, {
+			topicId: body.topic_id,
+			topicTitle: body.topic_title,
+			bookId: body.book_id,
+			chapter: body.chapter,
+			speakerId: body.speaker_id,
+			speakerName: body.speaker_name,
+		});
+		return json({ ok: true });
+	}
+	if (body.action === "release") {
+		if (!body.topic_id) return json({ error: "нужен topic_id" }, 400);
+		await releaseClaimByTopic(env.BOOK_CLUB_DB, body.topic_id);
+		return json({ ok: true });
+	}
+	if (body.action === "slides") {
+		if (!body.topic_id || !body.slides_url) return json({ error: "нужны topic_id и slides_url" }, 400);
+		await setClaimSlides(env.BOOK_CLUB_DB, body.topic_id, body.slides_url);
+		return json({ ok: true });
+	}
+
+	// Модерация заявок бота — по id заявки, с уведомлением спикера.
 	const claim = typeof body.id === "number" ? await getSpeakerClaim(env.BOOK_CLUB_DB, body.id) : null;
 	if (!claim) return json({ error: "заявка не найдена" }, 404);
 
 	if (body.action === "confirm") {
 		await updateSpeakerClaim(env.BOOK_CLUB_DB, claim.id, { status: "confirmed" });
-		await sendMessage(
-			env.BOT_TOKEN,
-			claim.chat_id,
-			`Тема «<b>${claim.topic_title}</b>» подтверждена — ты в программе! 🎉\n` +
-				"Админ свяжется с тобой по деталям презентации.",
-		);
+		if (claim.chat_id) {
+			await sendMessage(
+				env.BOT_TOKEN,
+				claim.chat_id,
+				`Тема «<b>${claim.topic_title}</b>» подтверждена — ты в программе! 🎉\n` +
+					"Админ свяжется с тобой по деталям презентации.",
+			);
+		}
 		return json({ ok: true });
 	}
 	if (body.action === "decline") {
 		await deleteSpeakerClaim(env.BOOK_CLUB_DB, claim.id);
-		await sendMessage(
-			env.BOT_TOKEN,
-			claim.chat_id,
-			`Заявку на тему «<b>${claim.topic_title}</b>» не подтвердили 😔 ` +
-				"Можно выбрать другую тему: /speaker",
-		);
+		if (claim.chat_id) {
+			await sendMessage(
+				env.BOT_TOKEN,
+				claim.chat_id,
+				`Заявку на тему «<b>${claim.topic_title}</b>» не подтвердили 😔 ` +
+					"Можно выбрать другую тему: /speaker",
+			);
+		}
 		return json({ ok: true });
 	}
-	return json({ error: "action: confirm | decline" }, 400);
+	return json({ error: "action: confirm | decline | assign | release | slides" }, 400);
 }
 
 /** Фото спикера из Telegram для CMS: GET /api/admin/photo?claim=<id>. */

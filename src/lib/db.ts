@@ -29,6 +29,8 @@ export interface SpeakerClaim {
 	photo_file_id: string | null;
 	/** id каталожного спикера (book-club-data), если заявитель узнан. */
 	speaker_id: string | null;
+	/** Ссылка на презентацию доклада (talks). */
+	slides_url: string | null;
 	status: "pending" | "confirmed";
 	created_at: number;
 }
@@ -57,6 +59,7 @@ const SCHEMA = [
 		full_name TEXT,
 		photo_file_id TEXT,
 		speaker_id TEXT,
+			slides_url TEXT,
 		status TEXT NOT NULL DEFAULT 'pending',
 		created_at INTEGER NOT NULL
 	)`,
@@ -125,7 +128,10 @@ export const cardKey = (book: string, cardId: string): string => `${book}:${card
 
 // Мягкие миграции для уже существующих таблиц (новые столбцы). ALTER падает,
 // если столбец уже есть — глотаем эту ошибку.
-const MIGRATIONS = [`ALTER TABLE speaker_claims ADD COLUMN speaker_id TEXT`];
+const MIGRATIONS = [
+	`ALTER TABLE speaker_claims ADD COLUMN speaker_id TEXT`,
+	`ALTER TABLE speaker_claims ADD COLUMN slides_url TEXT`,
+];
 
 export async function ensureSchema(db: D1Database): Promise<void> {
 	if (schemaReady) return;
@@ -233,6 +239,57 @@ export async function updateSpeakerClaim(
 	if (fields.status !== undefined) {
 		await db.prepare("UPDATE speaker_claims SET status = ? WHERE id = ?").bind(fields.status, id).run();
 	}
+}
+
+/**
+ * Админ назначает спикера на тему из CMS — создаёт/заменяет подтверждённую
+ * заявку в D1 (единый источник занятости). chat_id=0: заявка не от Telegram.
+ */
+export async function assignClaim(
+	db: D1Database,
+	claim: {
+		topicId: string;
+		topicTitle: string;
+		bookId: string;
+		chapter: string;
+		speakerId: string;
+		speakerName: string;
+	},
+): Promise<void> {
+	await ensureSchema(db);
+	// Тема уникальна (частичный индекс по topic_id) — сначала освобождаем.
+	await db.prepare("DELETE FROM speaker_claims WHERE topic_id = ?").bind(claim.topicId).run();
+	await db
+		.prepare(
+			`INSERT INTO speaker_claims
+				(topic_id, topic_title, book_id, chapter, chat_id, full_name, speaker_id, status, created_at)
+			 VALUES (?, ?, ?, ?, 0, ?, ?, 'confirmed', ?)`,
+		)
+		.bind(
+			claim.topicId,
+			claim.topicTitle,
+			claim.bookId,
+			claim.chapter,
+			claim.speakerName,
+			claim.speakerId,
+			Date.now(),
+		)
+		.run();
+}
+
+/** Освобождает тему — удаляет заявку по topic_id (единый рычаг для CMS/бота). */
+export async function releaseClaimByTopic(db: D1Database, topicId: string): Promise<void> {
+	await ensureSchema(db);
+	await db.prepare("DELETE FROM speaker_claims WHERE topic_id = ?").bind(topicId).run();
+}
+
+/** Проставляет ссылку на презентацию у заявки темы. */
+export async function setClaimSlides(db: D1Database, topicId: string, slidesUrl: string): Promise<void> {
+	await ensureSchema(db);
+	await db
+		.prepare("UPDATE speaker_claims SET slides_url = ? WHERE topic_id = ?")
+		.bind(slidesUrl, topicId)
+		.run();
 }
 
 /** Удаляет заявку (отклонение) — тема снова свободна. */

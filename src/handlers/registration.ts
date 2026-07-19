@@ -159,6 +159,24 @@ async function finalizeIfKnownSpeaker(
 	return fullName;
 }
 
+const EXPERIENCE_KEYBOARD: InlineKeyboardMarkup = {
+	inline_keyboard: [
+		[{ text: "Да, я уже выступал", callback_data: "sexp_y" }],
+		[{ text: "Нет, впервые", callback_data: "sexp_n" }],
+	],
+};
+
+/** Спрашиваем, выступал ли человек раньше (после брони темы). */
+async function promptExperience(env: Env, chatId: number, claimId: number): Promise<void> {
+	await setDialog(env.BOOK_CLUB_DB, chatId, "experience", claimId);
+	await sendMessage(
+		env.BOT_TOKEN,
+		chatId,
+		"Ты уже выступал в клубе с докладом?",
+		EXPERIENCE_KEYBOARD,
+	);
+}
+
 /** Нажатие на свободную тему плана: sclaim:<topicId>. */
 export async function handleClaimCallback(env: Env, cb: TelegramCallbackQuery, data: string): Promise<void> {
 	const message = cb.message;
@@ -211,15 +229,116 @@ export async function handleClaimCallback(env: Env, cb: TelegramCallbackQuery, d
 		return;
 	}
 
-	await setDialog(env.BOOK_CLUB_DB, message.chat.id, "name", claim.id);
+	// Не узнали автоматически — спрашиваем, выступал ли раньше.
 	await editMessageText(
 		env.BOT_TOKEN,
 		message.chat.id,
 		message.message_id,
-		`Тема «<b>${plan.topic.title}</b>» забронирована за тобой 🎉\n\n` +
-			"Теперь напиши имя и фамилию — так тебя объявим в программе:",
+		`Тема «<b>${plan.topic.title}</b>» забронирована за тобой 🎉`,
 	);
 	await answerCallback(env.BOT_TOKEN, cb.id, "Тема забронирована");
+	await promptExperience(env, message.chat.id, claim.id);
+}
+
+/** Ответ на вопрос об опыте: sexp_y (да) / sexp_n (нет). */
+export async function handleExperienceCallback(env: Env, cb: TelegramCallbackQuery, isYes: boolean): Promise<void> {
+	const message = cb.message;
+	if (!message) {
+		await answerCallback(env.BOT_TOKEN, cb.id);
+		return;
+	}
+	const chatId = message.chat.id;
+	const dialog = await getDialog(env.BOOK_CLUB_DB, chatId);
+	if (!dialog || dialog.step !== "experience" || dialog.claim_id === null) {
+		await answerCallback(env.BOT_TOKEN, cb.id, "Начни заново: /speaker");
+		return;
+	}
+	const claimId = dialog.claim_id;
+	await answerCallback(env.BOT_TOKEN, cb.id);
+
+	// Впервые — знакомимся: имя → фото (создастся новый спикер после апрува).
+	if (!isYes) {
+		await setDialog(env.BOOK_CLUB_DB, chatId, "name", claimId);
+		await editMessageText(
+			env.BOT_TOKEN,
+			chatId,
+			message.message_id,
+			"Тогда познакомимся! 👋 Напиши имя и фамилию — так объявим тебя в программе:",
+		);
+		return;
+	}
+
+	// Уже выступал — пробуем узнать по Telegram/прошлым заявкам.
+	const knownName = await finalizeIfKnownSpeaker(env, chatId, claimId, cb.from.username);
+	if (knownName) {
+		await editMessageText(
+			env.BOT_TOKEN,
+			chatId,
+			message.message_id,
+			`Узнал тебя, <b>${knownName}</b> — заявка уже у админа. Как подтвердят, напишу! 🎉`,
+		);
+		return;
+	}
+
+	// Не узнали — предлагаем выбрать себя из каталога спикеров.
+	const index = await fetchIndex();
+	const speakers = index.speakers ?? [];
+	if (speakers.length === 0) {
+		await setDialog(env.BOOK_CLUB_DB, chatId, "name", claimId);
+		await editMessageText(
+			env.BOT_TOKEN,
+			chatId,
+			message.message_id,
+			"Напиши имя и фамилию — так объявим тебя в программе:",
+		);
+		return;
+	}
+	await setDialog(env.BOOK_CLUB_DB, chatId, "pick", claimId);
+	await editMessageText(
+		env.BOT_TOKEN,
+		chatId,
+		message.message_id,
+		"Выбери себя из списка спикеров клуба:",
+		{ inline_keyboard: speakers.map((s) => [{ text: s.name, callback_data: `spick:${s.id}` }]) },
+	);
+}
+
+/** Выбор себя из каталога: spick:<speakerId> — привязываем заявку к спикеру. */
+export async function handleSpeakerPickCallback(env: Env, cb: TelegramCallbackQuery, data: string): Promise<void> {
+	const message = cb.message;
+	if (!message) {
+		await answerCallback(env.BOT_TOKEN, cb.id);
+		return;
+	}
+	const chatId = message.chat.id;
+	const dialog = await getDialog(env.BOOK_CLUB_DB, chatId);
+	if (!dialog || dialog.claim_id === null) {
+		await answerCallback(env.BOT_TOKEN, cb.id, "Начни заново: /speaker");
+		return;
+	}
+	const speakerId = data.slice("spick:".length);
+	const index = await fetchIndex();
+	const speaker = (index.speakers ?? []).find((s) => s.id === speakerId);
+	if (!speaker) {
+		await answerCallback(env.BOT_TOKEN, cb.id, "Спикер не найден");
+		return;
+	}
+
+	await updateSpeakerClaim(env.BOOK_CLUB_DB, dialog.claim_id, {
+		fullName: speaker.name,
+		speakerId: speaker.id,
+	});
+	await clearDialog(env.BOOK_CLUB_DB, chatId);
+	const claim = await getSpeakerClaim(env.BOOK_CLUB_DB, dialog.claim_id);
+	if (claim) await notifyAdmin(env, claim);
+
+	await answerCallback(env.BOT_TOKEN, cb.id, "Готово");
+	await editMessageText(
+		env.BOT_TOKEN,
+		chatId,
+		message.message_id,
+		`Отлично, <b>${speaker.name}</b>! Тема забронирована, заявка у админа. Как подтвердят — напишу! 🎉`,
+	);
 }
 
 /** Нажатие на занятую тему: staken:<topicId> — показываем, кем занята. */
@@ -283,12 +402,9 @@ export async function handleDialogMessage(env: Env, message: TelegramMessage): P
 			return true;
 		}
 
-		await setDialog(env.BOOK_CLUB_DB, chatId, "name", claim.id);
-		await sendMessage(
-			env.BOT_TOKEN,
-			chatId,
-			`Тема «<b>${text}</b>» записана.\n\nТеперь напиши имя и фамилию:`,
-		);
+		// Не узнали — спрашиваем про опыт.
+		await sendMessage(env.BOT_TOKEN, chatId, `Тема «<b>${text}</b>» записана.`);
+		await promptExperience(env, chatId, claim.id);
 		return true;
 	}
 
@@ -306,21 +422,27 @@ export async function handleDialogMessage(env: Env, message: TelegramMessage): P
 		return true;
 	}
 
-	// step === "photo": ждём фото или /skip.
-	const photo = message.photo?.at(-1);
-	if (!photo && text !== "/skip") return false;
-	if (photo && dialog.claim_id !== null) {
-		await updateSpeakerClaim(env.BOOK_CLUB_DB, dialog.claim_id, { photoFileId: photo.file_id });
-	}
-	await clearDialog(env.BOOK_CLUB_DB, chatId);
+	if (dialog.step === "photo") {
+		// Ждём фото или /skip.
+		const photo = message.photo?.at(-1);
+		if (!photo && text !== "/skip") return false;
+		if (photo && dialog.claim_id !== null) {
+			await updateSpeakerClaim(env.BOOK_CLUB_DB, dialog.claim_id, { photoFileId: photo.file_id });
+		}
+		await clearDialog(env.BOOK_CLUB_DB, chatId);
 
-	const claim = dialog.claim_id !== null ? await getSpeakerClaim(env.BOOK_CLUB_DB, dialog.claim_id) : null;
-	await sendMessage(
-		env.BOT_TOKEN,
-		chatId,
-		"Заявка отправлена админу 🎉 Как только её подтвердят — напишу. Спасибо, что выступаешь!",
-	);
-	if (claim) await notifyAdmin(env, claim);
+		const claim = dialog.claim_id !== null ? await getSpeakerClaim(env.BOOK_CLUB_DB, dialog.claim_id) : null;
+		await sendMessage(
+			env.BOT_TOKEN,
+			chatId,
+			"Заявка отправлена админу 🎉 Как только её подтвердят — напишу. Спасибо, что выступаешь!",
+		);
+		if (claim) await notifyAdmin(env, claim);
+		return true;
+	}
+
+	// step === "experience" | "pick": ждём нажатие кнопки, а не текст.
+	await sendMessage(env.BOT_TOKEN, chatId, "Выбери вариант кнопкой выше 👆");
 	return true;
 }
 

@@ -7,6 +7,8 @@ import { answerCallback, editMessageText } from "../lib/telegram";
 import {
 	handleClaimCallback,
 	handleCustomTopicCallback,
+	handleExperienceCallback,
+	handleSpeakerPickCallback,
 	handleTakenCallback,
 } from "./registration";
 
@@ -26,6 +28,8 @@ export async function handleCallback(env: Env, cb: TelegramCallbackQuery): Promi
 	if (data.startsWith("sclaim:")) return handleClaimCallback(env, cb, data);
 	if (data.startsWith("staken:")) return handleTakenCallback(env, cb, data);
 	if (data === "scustom") return handleCustomTopicCallback(env, cb);
+	if (data === "sexp_y" || data === "sexp_n") return handleExperienceCallback(env, cb, data === "sexp_y");
+	if (data.startsWith("spick:")) return handleSpeakerPickCallback(env, cb, data);
 
 	// Повторение карточек (текущая карточка — из сессии в D1).
 	if (data === "sf") return handleStudyFlip(env, cb);

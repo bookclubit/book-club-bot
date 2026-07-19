@@ -35,10 +35,10 @@ export interface SpeakerClaim {
 	created_at: number;
 }
 
-/** Шаг диалога заявки: ждём текст своей темы, ФИО или фото. */
+/** Шаг диалога заявки: своя тема, вопрос про опыт, выбор себя, ФИО или фото. */
 export interface SpeakerDialog {
 	chat_id: number;
-	step: "custom_topic" | "name" | "photo";
+	step: "custom_topic" | "experience" | "pick" | "name" | "photo";
 	claim_id: number | null;
 	updated_at: number;
 }

@@ -38,7 +38,7 @@ export interface SpeakerClaim {
 /** Шаг диалога заявки: своя тема, вопрос про опыт, выбор себя, ФИО или фото. */
 export interface SpeakerDialog {
 	chat_id: number;
-	step: "custom_topic" | "experience" | "pick" | "name" | "photo";
+	step: "custom_topic" | "experience" | "name" | "photo";
 	claim_id: number | null;
 	updated_at: number;
 }

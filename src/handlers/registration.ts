@@ -105,7 +105,7 @@ async function notifyAdmin(env: Env, claim: SpeakerClaim): Promise<void> {
 		Number(env.ADMIN_CHAT_ID),
 		`🎤 <b>Новая заявка на доклад</b>\n\n` +
 			`Тема: <b>${claim.topic_title}</b>${claim.topic_id ? "" : " (своя, вне плана)"}\n` +
-			`Спикер: ${from || `id ${claim.chat_id}`}${claim.speaker_id ? " · из каталога ✓" : ""}\n` +
+			`Спикер: ${from || `id ${claim.chat_id}`}${claim.speaker_id ? " · узнан по Telegram ✓" : " · новый, сверь личность"}\n` +
 			`Фото: ${claim.photo_file_id ? "есть" : claim.speaker_id ? "из каталога" : "нет"}\n\n` +
 			`Подтвердить или отклонить: ${CMS_CLAIMS_URL}`,
 	);
@@ -280,64 +280,16 @@ export async function handleExperienceCallback(env: Env, cb: TelegramCallbackQue
 		return;
 	}
 
-	// Не узнали — предлагаем выбрать себя из каталога спикеров.
-	const index = await fetchIndex();
-	const speakers = index.speakers ?? [];
-	if (speakers.length === 0) {
-		await setDialog(env.BOOK_CLUB_DB, chatId, "name", claimId);
-		await editMessageText(
-			env.BOT_TOKEN,
-			chatId,
-			message.message_id,
-			"Напиши имя и фамилию — так объявим тебя в программе:",
-		);
-		return;
-	}
-	await setDialog(env.BOOK_CLUB_DB, chatId, "pick", claimId);
+	// Не узнали автоматически. Самовыбор из каталога НЕ предлагаем (иначе можно
+	// выдать себя за другого спикера) — просим представиться, а связать заявку
+	// с существующим профилем в каталоге решает админ при модерации в CMS.
+	await setDialog(env.BOOK_CLUB_DB, chatId, "name", claimId);
 	await editMessageText(
 		env.BOT_TOKEN,
 		chatId,
 		message.message_id,
-		"Выбери себя из списка спикеров клуба:",
-		{ inline_keyboard: speakers.map((s) => [{ text: s.name, callback_data: `spick:${s.id}` }]) },
-	);
-}
-
-/** Выбор себя из каталога: spick:<speakerId> — привязываем заявку к спикеру. */
-export async function handleSpeakerPickCallback(env: Env, cb: TelegramCallbackQuery, data: string): Promise<void> {
-	const message = cb.message;
-	if (!message) {
-		await answerCallback(env.BOT_TOKEN, cb.id);
-		return;
-	}
-	const chatId = message.chat.id;
-	const dialog = await getDialog(env.BOOK_CLUB_DB, chatId);
-	if (!dialog || dialog.claim_id === null) {
-		await answerCallback(env.BOT_TOKEN, cb.id, "Начни заново: /speaker");
-		return;
-	}
-	const speakerId = data.slice("spick:".length);
-	const index = await fetchIndex();
-	const speaker = (index.speakers ?? []).find((s) => s.id === speakerId);
-	if (!speaker) {
-		await answerCallback(env.BOT_TOKEN, cb.id, "Спикер не найден");
-		return;
-	}
-
-	await updateSpeakerClaim(env.BOOK_CLUB_DB, dialog.claim_id, {
-		fullName: speaker.name,
-		speakerId: speaker.id,
-	});
-	await clearDialog(env.BOOK_CLUB_DB, chatId);
-	const claim = await getSpeakerClaim(env.BOOK_CLUB_DB, dialog.claim_id);
-	if (claim) await notifyAdmin(env, claim);
-
-	await answerCallback(env.BOT_TOKEN, cb.id, "Готово");
-	await editMessageText(
-		env.BOT_TOKEN,
-		chatId,
-		message.message_id,
-		`Отлично, <b>${speaker.name}</b>! Тема забронирована, заявка у админа. Как подтвердят — напишу! 🎉`,
+		"Не узнал тебя по Telegram-нику 🤔 Напиши имя и фамилию — так объявим тебя в программе, " +
+			"а админ свяжет заявку с твоим профилем в каталоге.",
 	);
 }
 
@@ -441,7 +393,7 @@ export async function handleDialogMessage(env: Env, message: TelegramMessage): P
 		return true;
 	}
 
-	// step === "experience" | "pick": ждём нажатие кнопки, а не текст.
+	// step === "experience": ждём нажатие кнопки (Да/Нет), а не текст.
 	await sendMessage(env.BOT_TOKEN, chatId, "Выбери вариант кнопкой выше 👆");
 	return true;
 }

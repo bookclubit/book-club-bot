@@ -3,9 +3,9 @@
 // «Пойду» (диплинк /start join_<eventId>): запись в D1, сразу ссылки,
 // напоминания — утром в день встречи и в начале встречи (cron).
 //
-// «Стать спикером» (/speaker или диплинк /start speaker): НЕ привязан
-// к встрече. Темы — из плана (главы активных книг будущих встреч, кроме
-// ближайшей), занятые помечены. Диалог: тема → ФИО → фото. Модерация —
+// «Стать спикером» (/speaker или диплинк /start speaker): темы — главы
+// будущих встреч-«докладов»; занятые (заявки D1 — единый источник) скрыты.
+// Диалог: тема → ФИО → фото (для вернувшегося спикера пропускается). Модерация —
 // в CMS (боту админ ничего не жмёт, только получает уведомление со ссылкой).
 
 import type { InlineKeyboardMarkup, TelegramCallbackQuery, TelegramMessage } from "../types";
@@ -56,10 +56,10 @@ export async function handleJoin(env: Env, message: TelegramMessage, eventId: st
 
 // ── Заявка спикера: выбор темы ───────────────────────────────────────────────
 
-// Свободные темы: не занятые заявкой (D1) и не назначенные админом в CMS.
+// Свободные темы: не занятые заявкой D1 (единый источник занятости).
 function freeTopics(topics: PlanTopic[], claims: SpeakerClaim[]): PlanTopic[] {
 	const taken = new Set(claims.filter((c) => c.topic_id).map((c) => c.topic_id));
-	return topics.filter((t) => !t.takenByCms && !taken.has(t.topic.id));
+	return topics.filter((t) => !taken.has(t.topic.id));
 }
 
 function speakerKeyboard(free: PlanTopic[]): InlineKeyboardMarkup {
@@ -78,7 +78,7 @@ function speakerIntro(free: PlanTopic[]): string {
 	const books = [...new Set(free.map((t) => t.bookTitle))].join(", ");
 	return (
 		"🎤 Хочешь выступить — отлично!\n\n" +
-		`Свободные темы из плана (${books}). На ближайшую встречу темы не выдаются — программа свёрстана.`
+		`Свободные темы ближайших докладов (${books}). Выбирай:`
 	);
 }
 

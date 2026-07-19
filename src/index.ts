@@ -20,6 +20,7 @@ import {
 	deleteSpeakerClaim,
 	getCardProgress,
 	getCardProgressMap,
+	getClaimByTopic,
 	getDailyCards,
 	getSpeakerClaim,
 	getUser,
@@ -171,6 +172,32 @@ async function handleAdminClaims(env: Env): Promise<Response> {
 	return json({ claims });
 }
 
+const TALKS_REPO = "https://github.com/bookclubit/book-club-talks";
+
+/** Сообщение спикеру о старте генерации презентации: PR-ветка + инструкция. */
+function talkReadyMessage(slides: string): string {
+	let branch = "";
+	try {
+		branch = new URL(slides).hostname.split(".")[0].toUpperCase();
+	} catch {
+		branch = "";
+	}
+	const prLink = branch ? `${TALKS_REPO}/pulls?q=is%3Apr+head%3A${branch}` : `${TALKS_REPO}/pulls`;
+	return (
+		"🎤 Готовлю твою презентацию!\n\n" +
+		"Через минуту здесь появится черновик — pull request с шаблоном по твоей теме:\n" +
+		`${prLink}\n\n` +
+		"<b>Как сделать презентацию:</b>\n" +
+		`1. Открой PR по ссылке выше и склонируй его ветку:\n` +
+		`<code>git clone -b ${branch} ${TALKS_REPO}.git</code>\n` +
+		`2. Правь слайды в папке <code>talks/${branch}/</code> — файл <code>index.html</code>.\n` +
+		"3. <code>git push</code> — превью в PR обновится само.\n" +
+		"4. Готово? Напиши админу — он смёржит, и слайды откроются на:\n" +
+		`${slides}\n\n` +
+		`Шаблон и подробности: ${TALKS_REPO}#readme`
+	);
+}
+
 /**
  * Управление заявками из CMS: POST /api/admin/claims. Единый источник занятости —
  * D1, поэтому CMS назначает/освобождает темы теми же заявками, что и бот.
@@ -220,6 +247,11 @@ async function handleAdminDecision(env: Env, request: Request): Promise<Response
 	if (body.action === "slides") {
 		if (!body.topic_id || !body.slides_url) return json({ error: "нужны topic_id и slides_url" }, 400);
 		await setClaimSlides(env.BOOK_CLUB_DB, body.topic_id, body.slides_url);
+		// Сообщаем спикеру: презентация генерируется — ссылка на PR + инструкция.
+		const claim = await getClaimByTopic(env.BOOK_CLUB_DB, body.topic_id);
+		if (claim?.chat_id) {
+			await sendMessage(env.BOT_TOKEN, claim.chat_id, talkReadyMessage(body.slides_url));
+		}
 		return json({ ok: true });
 	}
 

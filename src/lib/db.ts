@@ -200,6 +200,12 @@ export async function getSpeakerClaim(db: D1Database, id: number): Promise<Speak
 	return db.prepare("SELECT * FROM speaker_claims WHERE id = ?").bind(id).first<SpeakerClaim>();
 }
 
+/** Заявка по теме (topic_id уникален среди тем плана). */
+export async function getClaimByTopic(db: D1Database, topicId: string): Promise<SpeakerClaim | null> {
+	await ensureSchema(db);
+	return db.prepare("SELECT * FROM speaker_claims WHERE topic_id = ?").bind(topicId).first<SpeakerClaim>();
+}
+
 /** Профиль спикера из прошлых заявок этого пользователя (имя, фото, id), если есть. */
 export async function getSpeakerProfile(
 	db: D1Database,

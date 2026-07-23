@@ -5,9 +5,10 @@
  */
 
 import type { TelegramMessage, TelegramUpdate } from "./types";
-import { fetchEventByPath, fetchIndex } from "./lib/api";
+import { configureApi, fetchEventByPath, fetchIndex } from "./lib/api";
 import {
 	mintSession,
+	timingSafeEqual,
 	verifyInitData,
 	verifyLoginWidget,
 	verifySession,
@@ -33,14 +34,16 @@ import {
 	setDailyCards,
 	updateSpeakerClaim,
 	upsertUser,
+	wasReminderSent,
 } from "./lib/db";
-import { reviewFromQuality } from "./lib/spaced-repetition";
+import { initialProgress, reviewFromQuality } from "./lib/spaced-repetition";
 import { startStudy } from "./lib/study";
 import { eventDateFromPath, eventStartMs, mskToday, renderEventLinks } from "./lib/events";
-import { listSubscribers } from "./lib/storage";
+import { deleteSubscriber, listSubscribers } from "./lib/storage";
 import { getFileResponse, sendMessage, setChatMenuButton, setMyCommands } from "./lib/telegram";
 import { handleCallback } from "./handlers/callback";
 import {
+	DEFAULT_CMS_CLAIMS_URL,
 	handleCancel,
 	handleDialogMessage,
 	handleJoin,
@@ -124,15 +127,56 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
 	if (update.message) {
 		return routeMessage(env, update.message);
 	}
+	// Пользователь заблокировал бота — убираем из рассылки, чтобы не копить
+	// «мёртвых» подписчиков (прогресс в D1 сохраняется).
+	if (update.my_chat_member) {
+		const status = update.my_chat_member.new_chat_member.status;
+		if (status === "kicked" || status === "banned") {
+			const chatId = update.my_chat_member.chat.id;
+			await deleteSubscriber(env.BOOK_CLUB_KV, chatId);
+			console.log(`Бот заблокирован в чате ${chatId} — подписка на рассылку удалена`);
+		}
+	}
 }
 
 // ── HTTP API ─────────────────────────────────────────────────────────────────
 
+// CORS публичных эндпоинтов (/api/claims, /api/progress, /api/auth/* и т.д.) —
+// открыты любому origin. Админские маршруты ограничены доменом CMS (см. corsFor).
 const CORS_HEADERS = {
 	"access-control-allow-origin": "*",
 	"access-control-allow-methods": "GET, POST, OPTIONS",
 	"access-control-allow-headers": "authorization, content-type",
 };
+
+/** Origin-ы, которым разрешены кросс-доменные запросы к /api/admin/* (CMS). */
+function adminAllowedOrigins(env: Env): string[] {
+	try {
+		return [new URL(env.CMS_CLAIMS_URL || DEFAULT_CMS_CLAIMS_URL).origin];
+	} catch {
+		return [new URL(DEFAULT_CMS_CLAIMS_URL).origin];
+	}
+}
+
+/**
+ * CORS-заголовки под запрос: публичные маршруты — «*», админские — только
+ * origin из списка разрешённых. Неразрешённому origin заголовок
+ * access-control-allow-origin не ставим вовсе — браузер такой ответ не отдаст.
+ */
+function corsFor(env: Env, request: Request, url: URL): Record<string, string> {
+	if (!url.pathname.startsWith("/api/admin/")) return CORS_HEADERS;
+
+	const headers: Record<string, string> = {
+		"access-control-allow-methods": CORS_HEADERS["access-control-allow-methods"],
+		"access-control-allow-headers": CORS_HEADERS["access-control-allow-headers"],
+		vary: "origin",
+	};
+	const origin = request.headers.get("origin");
+	if (origin && adminAllowedOrigins(env).includes(origin)) {
+		headers["access-control-allow-origin"] = origin;
+	}
+	return headers;
+}
 
 function json(data: unknown, status = 200): Response {
 	return new Response(JSON.stringify(data), {
@@ -142,8 +186,10 @@ function json(data: unknown, status = 200): Response {
 }
 
 function isAdmin(env: Env, request: Request): boolean {
+	// Сравнение в постоянное время — токен нельзя подбирать по таймингу ответа.
+	if (!env.ADMIN_API_TOKEN) return false;
 	const header = request.headers.get("authorization") ?? "";
-	return Boolean(env.ADMIN_API_TOKEN) && header === `Bearer ${env.ADMIN_API_TOKEN}`;
+	return timingSafeEqual(header, `Bearer ${env.ADMIN_API_TOKEN}`);
 }
 
 /**
@@ -172,10 +218,12 @@ async function handleAdminClaims(env: Env): Promise<Response> {
 	return json({ claims });
 }
 
-const TALKS_REPO = "https://github.com/bookclubit/book-club-talks";
+/** Репозиторий презентаций по умолчанию (перекрывается env TALKS_REPO). */
+const DEFAULT_TALKS_REPO = "https://github.com/bookclubit/book-club-talks";
 
 /** Сообщение спикеру о старте генерации презентации: PR + превью + инструкция. */
-function talkReadyMessage(slides: string): string {
+function talkReadyMessage(env: Env, slides: string): string {
+	const talksRepo = env.TALKS_REPO || DEFAULT_TALKS_REPO;
 	let branch = "";
 	let previewUrl = "";
 	try {
@@ -186,7 +234,7 @@ function talkReadyMessage(slides: string): string {
 		branch = "";
 	}
 	// is%3Aopen — только актуальный открытый PR ветки (закрытые дубли не путают).
-	const prLink = branch ? `${TALKS_REPO}/pulls?q=is%3Apr+is%3Aopen+head%3A${branch}` : `${TALKS_REPO}/pulls`;
+	const prLink = branch ? `${talksRepo}/pulls?q=is%3Apr+is%3Aopen+head%3A${branch}` : `${talksRepo}/pulls`;
 	const preview = previewUrl
 		? `\n👀 <b>Живое превью</b> (для нового доклада поднимется за пару минут, дальше обновляется на каждый твой пуш):\n<a href="${previewUrl}">${previewUrl}</a>\n`
 		: "";
@@ -197,12 +245,12 @@ function talkReadyMessage(slides: string): string {
 		`📄 <b>Черновик доклада</b> (pull request):\n<a href="${prLink}">открыть на GitHub</a>\n` +
 		preview +
 		"\n<b>Как собрать презентацию:</b>\n" +
-		`1️⃣ Склонируй ветку черновика:\n<code>git clone -b ${branch} ${TALKS_REPO}.git</code>\n` +
+		`1️⃣ Склонируй ветку черновика:\n<code>git clone -b ${branch} ${talksRepo}.git</code>\n` +
 		`2️⃣ Правь слайды в <code>talks/${branch}/index.html</code>\n` +
 		"3️⃣ <code>git push</code> — превью обновится само, можно сразу смотреть\n" +
 		"4️⃣ Готово? Напиши админу — он смёржит, и доклад встанет на боевую ссылку:\n" +
 		`<a href="${slides}">${slides}</a>\n\n` +
-		`📚 Шаблон и подсказки: <a href="${TALKS_REPO}#readme">README</a>\n\n` +
+		`📚 Шаблон и подсказки: <a href="${talksRepo}#readme">README</a>\n\n` +
 		"Если что-то непонятно — просто напиши, помогу 💛"
 	);
 }
@@ -259,7 +307,7 @@ async function handleAdminDecision(env: Env, request: Request): Promise<Response
 		// Сообщаем спикеру: презентация генерируется — ссылка на PR + инструкция.
 		const claim = await getClaimByTopic(env.BOOK_CLUB_DB, body.topic_id);
 		if (claim?.chat_id) {
-			await sendMessage(env.BOT_TOKEN, claim.chat_id, talkReadyMessage(body.slides_url));
+			await sendMessage(env.BOT_TOKEN, claim.chat_id, talkReadyMessage(env, body.slides_url));
 		}
 		return json({ ok: true });
 	}
@@ -320,17 +368,18 @@ const BOT_COMMANDS = [
 	{ command: "stop", description: "Отписаться от карточек" },
 ];
 
-/** Мини-приложение клуба (Telegram Mini App / сайт). */
-const MINIAPP_URL = "https://book-club-miniapp.vercel.app";
+/** Мини-приложение клуба по умолчанию (перекрывается env MINIAPP_URL). */
+const DEFAULT_MINIAPP_URL = "https://book-club-miniapp.vercel.app";
 
 /**
  * Настройка бота: POST /api/admin/setup — регистрирует команды меню и кнопку
  * «Открыть приложение» (Mini App). Вызывать после изменения набора команд.
  */
 async function handleAdminSetup(env: Env): Promise<Response> {
+	const miniappUrl = env.MINIAPP_URL || DEFAULT_MINIAPP_URL;
 	await setMyCommands(env.BOT_TOKEN, BOT_COMMANDS);
-	await setChatMenuButton(env.BOT_TOKEN, "🗂 Приложение", MINIAPP_URL);
-	return json({ ok: true, commands: BOT_COMMANDS.map((c) => c.command), menu_button: MINIAPP_URL });
+	await setChatMenuButton(env.BOT_TOKEN, "🗂 Приложение", miniappUrl);
+	return json({ ok: true, commands: BOT_COMMANDS.map((c) => c.command), menu_button: miniappUrl });
 }
 
 // ── Платформа: вход через Telegram и единый прогресс карточек ─────────────────
@@ -437,23 +486,31 @@ async function handleReview(env: Env, userId: number, request: Request): Promise
 	// Композитный ключ «<book>:<cardId>» — общий с ботом (карточки по всем книгам).
 	const key = cardKey(bookId, cardId);
 	const now = Date.now();
-	const prev = (await getCardProgress(env.BOOK_CLUB_DB, userId, key)) ?? {
-		cardId: key,
-		repetition: 0,
-		interval: 0,
-		easiness: 2.5,
-		dueDate: now,
-		lastReviewed: 0,
-	};
+	const prev =
+		(await getCardProgress(env.BOOK_CLUB_DB, userId, key)) ?? initialProgress(key, now);
 	const next = reviewFromQuality(prev, PLATFORM_QUALITY[grade], now);
 	await saveCardProgress(env.BOOK_CLUB_DB, userId, bookId, next);
 	return json({ progress: next });
 }
 
 async function handleApi(env: Env, request: Request, url: URL): Promise<Response> {
+	const cors = corsFor(env, request, url);
 	if (request.method === "OPTIONS") {
-		return new Response(null, { status: 204, headers: CORS_HEADERS });
+		return new Response(null, { status: 204, headers: cors });
 	}
+	const response = await routeApi(env, request, url);
+	// json() ставит открытый CORS по умолчанию — на админских маршрутах
+	// заменяем его на ограниченный набор (origin только из списка разрешённых).
+	if (url.pathname.startsWith("/api/admin/")) {
+		response.headers.delete("access-control-allow-origin");
+		for (const [name, value] of Object.entries(cors)) {
+			response.headers.set(name, value);
+		}
+	}
+	return response;
+}
+
+async function routeApi(env: Env, request: Request, url: URL): Promise<Response> {
 	if (url.pathname === "/api/claims" && request.method === "GET") {
 		return handleClaimsApi(env);
 	}
@@ -516,17 +573,25 @@ const REMINDER_TEXT: Record<ReminderKind, string> = {
 async function sendEventReminder(env: Env, path: string, kind: ReminderKind): Promise<void> {
 	const event = await fetchEventByPath(path);
 	if (!event || event.finished) return;
-	const fresh = await markReminderSent(env.BOOK_CLUB_DB, event.id, kind);
-	if (!fresh) return;
+	if (await wasReminderSent(env.BOOK_CLUB_DB, event.id, kind)) return;
 
 	const chatIds = await listRegistrations(env.BOOK_CLUB_DB, event.id);
 	console.log(`Напоминание (${kind}) о ${event.id}: ${chatIds.length} записавшихся`);
+	let delivered = 0;
 	for (const chatId of chatIds) {
 		try {
 			await sendMessage(env.BOT_TOKEN, chatId, `${REMINDER_TEXT[kind]}\n\n${renderEventLinks(event)}`);
+			delivered++;
 		} catch (err) {
 			console.error(`Не удалось напомнить ${chatId} о ${event.id}:`, err);
 		}
+	}
+
+	// Помечаем отправленным только после цикла и хотя бы одной успешной доставки
+	// (либо когда напоминать некому) — разовый сбой сети не теряет напоминание:
+	// следующий запуск cron попробует ещё раз.
+	if (delivered > 0 || chatIds.length === 0) {
+		await markReminderSent(env.BOOK_CLUB_DB, event.id, kind);
 	}
 }
 
@@ -560,6 +625,9 @@ async function runTimedReminders(env: Env): Promise<void> {
 	}
 }
 
+/** Пауза между подписчиками рассылки: держит темп ниже лимита ~30 msg/s. */
+const BROADCAST_DELAY_MS = 75;
+
 /** Ежедневная рассылка карточек всем подписчикам. */
 async function runDailyBroadcast(env: Env): Promise<void> {
 	const subscribers = await listSubscribers(env.BOOK_CLUB_KV);
@@ -575,12 +643,15 @@ async function runDailyBroadcast(env: Env): Promise<void> {
 			// прерывать рассылку остальным.
 			console.error(`Не удалось отправить карточки ${sub.chatId}:`, err);
 		}
+		// Троттлинг: ожидание через setTimeout не тратит CPU-время воркера.
+		await new Promise((r) => setTimeout(r, BROADCAST_DELAY_MS));
 	}
 	console.log(`Рассылка завершена: карточки получили ${delivered} подписчиков`);
 }
 
 export default {
 	async fetch(request, env, ctx): Promise<Response> {
+		configureApi(env);
 		const url = new URL(request.url);
 
 		// API для miniapp и CMS.
@@ -599,13 +670,19 @@ export default {
 			return new Response("Method Not Allowed", { status: 405 });
 		}
 
-		// Проверка секрета вебхука (если задан WEBHOOK_SECRET).
-		if (env.WEBHOOK_SECRET) {
-			const header = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
-			if (header !== env.WEBHOOK_SECRET) {
-				console.warn("Отклонён вебхук с неверным секретом");
-				return new Response("Forbidden", { status: 403 });
-			}
+		// Проверка секрета вебхука — fail-closed: без WEBHOOK_SECRET вебхук
+		// не работает (иначе любой может слать боту поддельные update-ы).
+		if (!env.WEBHOOK_SECRET) {
+			console.error(
+				"КРИТИЧНО: WEBHOOK_SECRET не задан — вебхук отключён. " +
+					"Задай секрет (wrangler secret put WEBHOOK_SECRET) и перерегистрируй setWebhook.",
+			);
+			return new Response("Webhook is not configured", { status: 500 });
+		}
+		const secretHeader = request.headers.get("X-Telegram-Bot-Api-Secret-Token") ?? "";
+		if (!timingSafeEqual(secretHeader, env.WEBHOOK_SECRET)) {
+			console.warn("Отклонён вебхук с неверным секретом");
+			return new Response("Forbidden", { status: 403 });
 		}
 
 		let update: TelegramUpdate;
@@ -627,6 +704,7 @@ export default {
 	},
 
 	async scheduled(controller, env, ctx): Promise<void> {
+		configureApi(env);
 		// Ежедневный cron (10:00 МСК): карточки + утренние напоминания.
 		if (controller.cron === "0 7 * * *") {
 			ctx.waitUntil(

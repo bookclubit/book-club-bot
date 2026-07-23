@@ -4,17 +4,24 @@ declare module "cloudflare:test" {
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 import worker from "../src/index";
-import type { Flashcard } from "../src/types";
-import { calculateNextReview, getDueCards } from "../src/lib/spaced-repetition";
+import type { CardProgress, DeckCard, Flashcard } from "../src/types";
+import {
+	calculateNextReview,
+	initialProgress,
+	reviewFromQuality,
+	selectDue,
+} from "../src/lib/spaced-repetition";
 import { eventDateFromPath, eventPathById } from "../src/lib/events";
 import { findSpeakerByUsername, telegramHandle } from "../src/lib/speakers";
 import {
 	assignClaim,
+	cardKey,
 	createSpeakerClaim,
 	deleteSpeakerClaim,
 	getSpeakerProfile,
 	listSpeakerClaims,
 	releaseClaimByTopic,
+	resetSchemaCacheForTests,
 	saveSpeakerIdentity,
 	setClaimSlides,
 } from "../src/lib/db";
@@ -35,6 +42,116 @@ describe("worker fetch", () => {
 		await waitOnExecutionContext(ctx);
 		expect(response.status).toBe(200);
 		expect(await response.text()).toContain("Книжного клуба");
+	});
+});
+
+describe("вебхук: секрет обязателен (fail-closed)", () => {
+	const SECRET = "test-webhook-secret";
+	const update = JSON.stringify({ update_id: 1 });
+
+	function webhookRequest(headers: Record<string, string> = {}) {
+		return new IncomingRequest("http://example.com/", {
+			method: "POST",
+			headers: { "content-type": "application/json", ...headers },
+			body: update,
+		});
+	}
+
+	it("без WEBHOOK_SECRET в env вебхук отключён (500)", async () => {
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(
+			webhookRequest({ "X-Telegram-Bot-Api-Secret-Token": SECRET }),
+			{ ...env, WEBHOOK_SECRET: undefined },
+			ctx,
+		);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(500);
+	});
+
+	it("запрос без заголовка секрета отклоняется (403)", async () => {
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(
+			webhookRequest(),
+			{ ...env, WEBHOOK_SECRET: SECRET },
+			ctx,
+		);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(403);
+	});
+
+	it("запрос с неверным секретом отклоняется (403)", async () => {
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(
+			webhookRequest({ "X-Telegram-Bot-Api-Secret-Token": "wrong" }),
+			{ ...env, WEBHOOK_SECRET: SECRET },
+			ctx,
+		);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(403);
+	});
+
+	it("запрос с верным секретом принимается (200 OK)", async () => {
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(
+			webhookRequest({ "X-Telegram-Bot-Api-Secret-Token": SECRET }),
+			{ ...env, WEBHOOK_SECRET: SECRET },
+			ctx,
+		);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(200);
+		expect(await response.text()).toBe("OK");
+	});
+});
+
+describe("админские эндпоинты: Bearer-токен", () => {
+	const TOKEN = "test-admin-token";
+
+	function adminRequest(headers: Record<string, string> = {}) {
+		return new IncomingRequest("http://example.com/api/admin/claims", { headers });
+	}
+
+	it("без токена — 401", async () => {
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(
+			adminRequest(),
+			{ ...env, ADMIN_API_TOKEN: TOKEN },
+			ctx,
+		);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(401);
+	});
+
+	it("с неверным токеном — 401", async () => {
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(
+			adminRequest({ authorization: "Bearer wrong-token" }),
+			{ ...env, ADMIN_API_TOKEN: TOKEN },
+			ctx,
+		);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(401);
+	});
+
+	it("если токен не задан в env — 401 даже с любым Bearer", async () => {
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(
+			adminRequest({ authorization: "Bearer anything" }),
+			{ ...env, ADMIN_API_TOKEN: undefined },
+			ctx,
+		);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(401);
+	});
+
+	it("с верным токеном — 200", async () => {
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(
+			adminRequest({ authorization: `Bearer ${TOKEN}` }),
+			{ ...env, ADMIN_API_TOKEN: TOKEN },
+			ctx,
+		);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(200);
 	});
 });
 
@@ -159,20 +276,72 @@ describe("Telegram-аутентификация", () => {
 	});
 });
 
-describe("getDueCards", () => {
-	const cards: Flashcard[] = [
-		{ id: "a", type: "qa", question: "q", answer: "a", chapter: "1", difficulty: "easy" },
-		{ id: "b", type: "qa", question: "q", answer: "a", chapter: "1", difficulty: "easy" },
-	];
+describe("SM-2 reviewFromQuality (оценки сайта, 0–5)", () => {
+	const now = 1_700_000_000_000;
+	const DAY = 24 * 60 * 60 * 1000;
 
-	it("новые карточки считаются подлежащими повторению", () => {
-		const due = getDueCards(cards, new Map(), Date.now(), 5);
-		expect(due).toHaveLength(2);
+	it("quality=4 (good с сайта): интервалы 1 → 6 → round(6·EF)", () => {
+		const p1 = reviewFromQuality(undefined, 4, now);
+		expect(p1.repetition).toBe(1);
+		expect(p1.interval).toBe(1);
+		// При q=4 поправка EF равна нулю — остаётся дефолтные 2.5.
+		expect(p1.easiness).toBeCloseTo(2.5);
+		expect(p1.dueDate).toBe(now + DAY);
+
+		const p2 = reviewFromQuality(p1, 4, now);
+		expect(p2.repetition).toBe(2);
+		expect(p2.interval).toBe(6);
+
+		const p3 = reviewFromQuality(p2, 4, now);
+		expect(p3.repetition).toBe(3);
+		expect(p3.interval).toBe(Math.round(6 * p3.easiness));
+	});
+
+	it("quality<3 сбрасывает повторения, initialProgress — карточка к повторению сразу", () => {
+		const seed = initialProgress("book:card", now);
+		expect(seed.dueDate).toBe(now);
+		const failed = reviewFromQuality(seed, 1, now);
+		expect(failed.repetition).toBe(0);
+		expect(failed.interval).toBe(1);
+	});
+});
+
+describe("selectDue (общая для бота и рассылки выборка карточек)", () => {
+	const now = 1_700_000_000_000;
+	const card = (id: string): Flashcard => ({
+		id,
+		type: "qa",
+		question: "q",
+		answer: "a",
+		chapter: "1",
+		difficulty: "easy",
+	});
+	const deck: DeckCard[] = [
+		{ book: "book-1", card: card("a") },
+		{ book: "book-2", card: card("b") },
+		{ book: "book-2", card: card("c") },
+	];
+	const keyOf = (d: DeckCard) => cardKey(d.book, d.card.id);
+
+	it("новые карточки (без прогресса) подлежат повторению", () => {
+		const due = selectDue(deck, keyOf, new Map(), now, 5);
+		expect(due).toHaveLength(3);
 	});
 
 	it("соблюдает лимит", () => {
-		const due = getDueCards(cards, new Map(), Date.now(), 1);
+		const due = selectDue(deck, keyOf, new Map(), now, 1);
 		expect(due).toHaveLength(1);
+	});
+
+	it("карточки с dueDate в будущем исключаются, просроченные — первыми", () => {
+		const progress = new Map<string, CardProgress>([
+			// «a» — повторять только завтра, не должна попасть в выборку.
+			["book-1:a", { ...initialProgress("book-1:a", now), dueDate: now + 1 }],
+			// «c» — просрочена сильнее, чем новая «b» (dueDate=0 у новых при сортировке).
+			["book-2:c", { ...initialProgress("book-2:c", now), dueDate: now - 1000 }],
+		]);
+		const due = selectDue(deck, keyOf, progress, now, 5);
+		expect(due.map((d) => d.card.id)).toEqual(["b", "c"]);
 	});
 });
 
@@ -210,6 +379,8 @@ describe("Сопоставление спикера по Telegram", () => {
 
 describe("Единый источник занятости: заявки из CMS (D1)", () => {
 	it("assign создаёт подтверждённую заявку, slides проставляет, release освобождает", async () => {
+		// Хранилище D1 изолировано между тестами, а кэш «схема создана» — нет.
+		resetSchemaCacheForTests();
 		const db = env.BOOK_CLUB_DB;
 		const topic = "test-topic-single-source";
 		await releaseClaimByTopic(db, topic);

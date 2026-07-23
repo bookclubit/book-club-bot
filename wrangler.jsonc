@@ -40,10 +40,27 @@
 	// каждые 15 минут — напоминания «за час» и «встреча началась».
 	"triggers": {
 		"crons": ["0 7 * * *", "*/15 * * * *"]
+	},
+
+	/**
+	 * Внешние адреса стека (в коде есть фолбэки на эти же значения,
+	 * так что деплой без переменных ничего не ломает):
+	 * - RAW_ROOT — корень raw-контента book-club-data;
+	 * - TALKS_REPO — репозиторий презентаций;
+	 * - MINIAPP_URL — мини-приложение клуба (кнопка меню бота);
+	 * - CMS_CLAIMS_URL — страница модерации заявок в CMS
+	 *   (её origin — единственный разрешённый CORS для /api/admin/*).
+	 */
+	"vars": {
+		"RAW_ROOT": "https://raw.githubusercontent.com/bookclubit/book-club-data/main",
+		"TALKS_REPO": "https://github.com/bookclubit/book-club-talks",
+		"MINIAPP_URL": "https://book-club-miniapp.vercel.app",
+		"CMS_CLAIMS_URL": "https://book-club-cms.vercel.app/claims"
 	}
 
 	/**
-	 * Токен бота хранится в секретах, а не здесь:
-	 *   wrangler secret put BOT_TOKEN
+	 * Секреты хранятся не здесь, а в `wrangler secret put`:
+	 *   BOT_TOKEN, WEBHOOK_SECRET (обязателен — вебхук fail-closed),
+	 *   ADMIN_CHAT_ID, ADMIN_API_TOKEN.
 	 */
 }

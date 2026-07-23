@@ -1,7 +1,7 @@
 // Алгоритм интервального повторения SM-2 (SuperMemo 2).
 // https://super-memory.com/english/ol/sm2.htm
 
-import type { CardProgress, Flashcard, Grade } from "../types";
+import type { CardProgress, Grade } from "../types";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MIN_EASINESS = 1.3;
@@ -87,28 +87,32 @@ export function reviewFromQuality(
 }
 
 /**
- * Выбирает карточки, подлежащие повторению.
- * Новые (без прогресса) и просроченные (dueDate <= now) — по возрастанию dueDate.
- * @param cards все карточки книги
- * @param progress map cardId → прогресс
+ * Выбирает элементы, подлежащие повторению: новые (без прогресса) и
+ * просроченные (dueDate <= now) — по возрастанию dueDate (сначала самые
+ * «просроченные» и новые). Параметризована ключом прогресса, поэтому работает
+ * и с карточками одной книги (ключ — id), и с колодой по всем книгам клуба
+ * (композитный ключ «<book>:<cardId>»).
+ * @param items карточки (или обёртки над ними)
+ * @param keyOf ключ элемента в map прогресса
+ * @param progress map ключ → прогресс
  * @param now текущее время, epoch ms
- * @param limit максимум карточек
+ * @param limit максимум элементов
  */
-export function getDueCards(
-	cards: Flashcard[],
+export function selectDue<T>(
+	items: T[],
+	keyOf: (item: T) => string,
 	progress: Map<string, CardProgress>,
 	now: number,
 	limit: number,
-): Flashcard[] {
-	const due = cards.filter((card) => {
-		const p = progress.get(card.id);
+): T[] {
+	const due = items.filter((item) => {
+		const p = progress.get(keyOf(item));
 		return !p || p.dueDate <= now;
 	});
 
-	// Сначала самые «просроченные» и новые карточки.
 	due.sort((a, b) => {
-		const da = progress.get(a.id)?.dueDate ?? 0;
-		const db = progress.get(b.id)?.dueDate ?? 0;
+		const da = progress.get(keyOf(a))?.dueDate ?? 0;
+		const db = progress.get(keyOf(b))?.dueDate ?? 0;
 		return da - db;
 	});
 

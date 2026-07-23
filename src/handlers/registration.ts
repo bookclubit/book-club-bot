@@ -28,8 +28,13 @@ import { fetchPlanTopics, type PlanTopic } from "../lib/plan";
 import { findSpeakerByUsername } from "../lib/speakers";
 import { answerCallback, editMessageText, sendMessage } from "../lib/telegram";
 
-/** Страница модерации заявок в CMS (уведомление админу ведёт сюда). */
-const CMS_CLAIMS_URL = "https://book-club-cms.vercel.app/claims";
+/**
+ * Страница модерации заявок в CMS (уведомление админу ведёт сюда).
+ * Перекрывается переменной env CMS_CLAIMS_URL; фолбэк — текущий адрес.
+ */
+export const DEFAULT_CMS_CLAIMS_URL = "https://book-club-cms.vercel.app/claims";
+
+const cmsClaimsUrl = (env: Env): string => env.CMS_CLAIMS_URL || DEFAULT_CMS_CLAIMS_URL;
 
 // ── Запись на встречу ────────────────────────────────────────────────────────
 
@@ -108,7 +113,7 @@ async function notifyAdmin(env: Env, claim: SpeakerClaim): Promise<void> {
 			`Тема: <b>${claim.topic_title}</b>${claim.topic_id ? "" : " (своя, вне плана)"}\n` +
 			`Спикер: ${from || `id ${claim.chat_id}`}${claim.speaker_id ? " · узнан по Telegram ✓" : " · новый, сверь личность"}\n` +
 			`Фото: ${claim.photo_file_id ? "есть" : claim.speaker_id ? "из каталога" : "нет"}\n\n` +
-			`Подтвердить или отклонить: ${CMS_CLAIMS_URL}`,
+			`Подтвердить или отклонить: ${cmsClaimsUrl(env)}`,
 	);
 }
 

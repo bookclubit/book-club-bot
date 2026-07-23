@@ -2,7 +2,7 @@
 // Текущая карточка и очередь хранятся в D1 (study_session), поэтому кнопки
 // несут короткий callback_data, а не id карточки.
 
-import type { CardProgress, DeckCard, Flashcard, Grade, TelegramCallbackQuery } from "../types";
+import type { Flashcard, Grade, TelegramCallbackQuery } from "../types";
 import { fetchAllFlashcards, fetchFlashcards } from "./api";
 import { flipKeyboard, gradeKeyboard, renderBack, renderFront } from "./cards";
 import {
@@ -15,7 +15,7 @@ import {
 	saveCardProgress,
 	saveSession,
 } from "./db";
-import { calculateNextReview } from "./spaced-repetition";
+import { calculateNextReview, initialProgress, selectDue } from "./spaced-repetition";
 import { answerCallback, editMessageText, sendMessage } from "./telegram";
 
 /** Русское склонение слова «день». */
@@ -25,25 +25,6 @@ function pluralDays(n: number): string {
 	if (mod10 === 1 && mod100 !== 11) return "день";
 	if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return "дня";
 	return "дней";
-}
-
-/** Карточки к повторению по всем книгам: новые и просроченные, самые «старые» вперёд. */
-function selectDue(
-	deck: DeckCard[],
-	progress: Map<string, CardProgress>,
-	now: number,
-	limit: number,
-): DeckCard[] {
-	const due = deck.filter((d) => {
-		const p = progress.get(cardKey(d.book, d.card.id));
-		return !p || p.dueDate <= now;
-	});
-	due.sort((a, b) => {
-		const da = progress.get(cardKey(a.book, a.card.id))?.dueDate ?? 0;
-		const db = progress.get(cardKey(b.book, b.card.id))?.dueDate ?? 0;
-		return da - db;
-	});
-	return due.slice(0, limit);
 }
 
 async function findCard(book: string, cardId: string): Promise<Flashcard | null> {
@@ -76,7 +57,8 @@ export async function startStudy(
 		getDailyCards(env.BOOK_CLUB_DB, chatId),
 	]);
 
-	const due = selectDue(deck, progress, Date.now(), limit);
+	// Карточки к повторению по всем книгам: новые и просроченные, самые «старые» вперёд.
+	const due = selectDue(deck, (d) => cardKey(d.book, d.card.id), progress, Date.now(), limit);
 	if (due.length === 0) return 0;
 
 	await saveSession(
@@ -131,14 +113,8 @@ export async function handleStudyGrade(
 	const card = await findCard(b, c);
 	const key = cardKey(b, c);
 	const now = Date.now();
-	const prev = (await getCardProgress(env.BOOK_CLUB_DB, chatId, key)) ?? {
-		cardId: key,
-		repetition: 0,
-		interval: 0,
-		easiness: 2.5,
-		dueDate: now,
-		lastReviewed: 0,
-	};
+	const prev =
+		(await getCardProgress(env.BOOK_CLUB_DB, chatId, key)) ?? initialProgress(key, now);
 	const next = calculateNextReview(prev, grade, now);
 	await saveCardProgress(env.BOOK_CLUB_DB, chatId, b, next);
 

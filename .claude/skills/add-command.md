@@ -24,8 +24,9 @@
    - добавь `case "help": return handleHelp(env, message);` в `routeMessage`;
    - при необходимости упомяни команду в `UNKNOWN_COMMAND` и в приветствии `start.ts`.
 
-3. **Данные книги** бери через `lib/api.ts` (`fetchFlashcards`, `fetchBookMeta`),
-   прогресс — через `lib/storage.ts`. Не обращайся к KV и fetch напрямую из команды.
+3. **Данные книги** бери через `lib/api.ts` (`fetchFlashcards`, `fetchAllFlashcards`,
+   `fetchIndex`), прогресс — через `lib/db.ts` (D1), подписчиков — через
+   `lib/storage.ts` (KV). Не обращайся к KV/D1 и fetch напрямую из команды.
 
 4. **Тесты**: при наличии логики добавь проверку в `test/index.spec.ts`.
 

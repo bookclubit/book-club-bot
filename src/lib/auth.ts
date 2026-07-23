@@ -40,7 +40,7 @@ async function sha256(msg: string): Promise<Uint8Array> {
 }
 
 /** Сравнение в постоянное время (защита от тайминг-атак). */
-function timingSafeEqual(a: string, b: string): boolean {
+export function timingSafeEqual(a: string, b: string): boolean {
 	if (a.length !== b.length) return false;
 	let diff = 0;
 	for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);

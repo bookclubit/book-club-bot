@@ -22,7 +22,8 @@
 ## Стек
 
 - Cloudflare Workers (TypeScript)
-- Workers KV — подписчики и прогресс
+- Workers KV — подписчики рассылки
+- D1 — брони тем, записи на встречи, прогресс SM-2 (общий для бота и сайта)
 - Cron Trigger — ежедневная рассылка
 - Wrangler 4, Vitest
 
@@ -30,7 +31,7 @@
 
 Карточки берутся из репозитория
 [`book-club-data`](https://github.com/bookclubit/book-club-data)
-(папка `books/<bookId>`). Пока используется книга `docker-up-and-running`.
+(папка `books/<bookId>`) — по **всем книгам клуба** из реестра `index.json`.
 
 ## Разработка
 
@@ -44,9 +45,25 @@ npx tsc --noEmit     # проверка типов
 ## Деплой
 
 ```bash
-wrangler secret put BOT_TOKEN     # токен от BotFather
+wrangler secret put BOT_TOKEN        # токен от BotFather
+wrangler secret put WEBHOOK_SECRET   # обязателен: без него вебхук отвечает 500
 npm run deploy
 ```
+
+Секрет вебхука нужно передать и в `setWebhook` (`secret_token`) — проверка
+fail-closed: запросы без верного `X-Telegram-Bot-Api-Secret-Token` отклоняются.
+
+### Переменные (vars)
+
+Внешние адреса вынесены в `vars` в `wrangler.jsonc` (в коде есть фолбэки
+на эти же значения, деплой без переменных ничего не ломает):
+
+| Переменная       | Назначение                                                        |
+| ---------------- | ----------------------------------------------------------------- |
+| `RAW_ROOT`       | Корень raw-контента `book-club-data`                              |
+| `TALKS_REPO`     | Репозиторий презентаций `book-club-talks`                         |
+| `MINIAPP_URL`    | Мини-приложение клуба (кнопка меню бота)                          |
+| `CMS_CLAIMS_URL` | Страница модерации в CMS; её origin — CORS-домен для `/api/admin/*` |
 
 Подробности — в [CLAUDE.md](./CLAUDE.md) и `.claude/skills/deploy.md`.
 

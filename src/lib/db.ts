@@ -47,6 +47,14 @@ export interface SpeakerDialog {
 // проще и надёжнее, чем отдельная инфраструктура миграций.
 let schemaReady = false;
 
+/**
+ * Сбрасывает кэш «схема уже создана». Нужен только тестам: vitest-pool-workers
+ * изолирует хранилище D1 между тестами, а состояние модуля — нет.
+ */
+export function resetSchemaCacheForTests(): void {
+	schemaReady = false;
+}
+
 const SCHEMA = [
 	`CREATE TABLE IF NOT EXISTS speaker_claims (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -137,23 +145,42 @@ const SCHEMA = [
 /** Композитный ключ прогресса карточки (уникален по всем книгам). */
 export const cardKey = (book: string, cardId: string): string => `${book}:${cardId}`;
 
-// Мягкие миграции для уже существующих таблиц (новые столбцы). ALTER падает,
-// если столбец уже есть — глотаем эту ошибку.
-const MIGRATIONS = [
-	`ALTER TABLE speaker_claims ADD COLUMN speaker_id TEXT`,
-	`ALTER TABLE speaker_claims ADD COLUMN slides_url TEXT`,
+// Мягкие миграции для уже существующих таблиц: добавляем столбец, только если
+// его ещё нет (проверка через PRAGMA table_info, а не по тексту ошибки ALTER).
+const MIGRATIONS: { table: string; column: string; sql: string }[] = [
+	{
+		table: "speaker_claims",
+		column: "speaker_id",
+		sql: "ALTER TABLE speaker_claims ADD COLUMN speaker_id TEXT",
+	},
+	{
+		table: "speaker_claims",
+		column: "slides_url",
+		sql: "ALTER TABLE speaker_claims ADD COLUMN slides_url TEXT",
+	},
 ];
+
+/** Имена столбцов таблицы (PRAGMA table_info). */
+async function tableColumns(db: D1Database, table: string): Promise<Set<string>> {
+	const { results } = await db.prepare(`PRAGMA table_info(${table})`).all<{ name: string }>();
+	return new Set(results.map((r) => r.name));
+}
 
 export async function ensureSchema(db: D1Database): Promise<void> {
 	if (schemaReady) return;
 	for (const sql of SCHEMA) {
 		await db.prepare(sql).run();
 	}
-	for (const sql of MIGRATIONS) {
-		try {
-			await db.prepare(sql).run();
-		} catch (err) {
-			if (!String(err).includes("duplicate column")) throw err;
+	const columnsByTable = new Map<string, Set<string>>();
+	for (const m of MIGRATIONS) {
+		let columns = columnsByTable.get(m.table);
+		if (!columns) {
+			columns = await tableColumns(db, m.table);
+			columnsByTable.set(m.table, columns);
+		}
+		if (!columns.has(m.column)) {
+			await db.prepare(m.sql).run();
+			columns.add(m.column);
 		}
 	}
 	schemaReady = true;
@@ -422,6 +449,20 @@ export async function listRegistrations(db: D1Database, eventId: string): Promis
 }
 
 // ── Флаги напоминаний ────────────────────────────────────────────────────────
+
+/** true — напоминание уже отправлялось (только проверка, без пометки). */
+export async function wasReminderSent(
+	db: D1Database,
+	eventId: string,
+	kind: "morning" | "hour" | "start",
+): Promise<boolean> {
+	await ensureSchema(db);
+	const row = await db
+		.prepare("SELECT 1 FROM reminders_sent WHERE event_id = ? AND kind = ?")
+		.bind(eventId, kind)
+		.first();
+	return row !== null;
+}
 
 /** true — напоминание ещё не отправлялось (и теперь помечено отправленным). */
 export async function markReminderSent(

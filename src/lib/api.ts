@@ -1,9 +1,20 @@
 // Загрузка данных из репозитория book-club-data (GitHub raw).
 
-import type { BookMeta, Chapter, ClubEvent, ContentIndex, DeckCard, Flashcard } from "../types";
+import type { Chapter, ClubEvent, ContentIndex, DeckCard, Flashcard } from "../types";
 
-const RAW_ROOT = "https://raw.githubusercontent.com/bookclubit/book-club-data/main";
-const DATA_BASE = `${RAW_ROOT}/books`;
+/** Корень raw-контента по умолчанию (перекрывается переменной env RAW_ROOT). */
+const DEFAULT_RAW_ROOT = "https://raw.githubusercontent.com/bookclubit/book-club-data/main";
+
+// Настраивается один раз на изолят из env (configureApi в точке входа Worker);
+// фолбэк на дефолт — чтобы деплой без новой переменной ничего не ломал.
+let rawRoot = DEFAULT_RAW_ROOT;
+
+/** Применяет переменные env к загрузчику контента (вызывать на входе Worker). */
+export function configureApi(env: { RAW_ROOT?: string }): void {
+	rawRoot = env.RAW_ROOT || DEFAULT_RAW_ROOT;
+}
+
+const dataBase = (): string => `${rawRoot}/books`;
 
 /** GET c повторами при сетевых ошибках / 5xx. Экспоненциальная задержка. */
 async function fetchWithRetry(url: string, retries = 3): Promise<Response> {
@@ -33,7 +44,7 @@ async function fetchWithRetry(url: string, retries = 3): Promise<Response> {
 
 /** Загружает все карточки книги. */
 export async function fetchFlashcards(bookId: string): Promise<Flashcard[]> {
-	const res = await fetchWithRetry(`${DATA_BASE}/${bookId}/flashcards.json`);
+	const res = await fetchWithRetry(`${dataBase()}/${bookId}/flashcards.json`);
 	const data = (await res.json()) as Flashcard[];
 	if (!Array.isArray(data)) {
 		throw new Error(`Некорректный формат flashcards.json для ${bookId}`);
@@ -60,22 +71,16 @@ export async function fetchAllFlashcards(): Promise<DeckCard[]> {
 	return perBook.flat();
 }
 
-/** Загружает метаданные книги. */
-export async function fetchBookMeta(bookId: string): Promise<BookMeta> {
-	const res = await fetchWithRetry(`${DATA_BASE}/${bookId}/meta.json`);
-	return (await res.json()) as BookMeta;
-}
-
 /** Загружает единый реестр контента (index.json). */
 export async function fetchIndex(): Promise<ContentIndex> {
-	const res = await fetchWithRetry(`${RAW_ROOT}/index.json`);
+	const res = await fetchWithRetry(`${rawRoot}/index.json`);
 	return (await res.json()) as ContentIndex;
 }
 
 /** Загружает событие по пути внутри events/ (например, live-talks/2026-….json). */
 export async function fetchEventByPath(path: string): Promise<ClubEvent | null> {
 	try {
-		const res = await fetchWithRetry(`${RAW_ROOT}/events/${path}`);
+		const res = await fetchWithRetry(`${rawRoot}/events/${path}`);
 		return (await res.json()) as ClubEvent;
 	} catch {
 		return null;
@@ -85,7 +90,7 @@ export async function fetchEventByPath(path: string): Promise<ClubEvent | null> 
 /** Загружает индекс главы (chapter.json) книги по имени папки. */
 export async function fetchChapter(folder: string, chapterSlug: string): Promise<Chapter | null> {
 	try {
-		const res = await fetchWithRetry(`${DATA_BASE}/${folder}/chapters/${chapterSlug}/chapter.json`);
+		const res = await fetchWithRetry(`${dataBase()}/${folder}/chapters/${chapterSlug}/chapter.json`);
 		return (await res.json()) as Chapter;
 	} catch {
 		return null;

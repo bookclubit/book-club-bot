@@ -4,6 +4,23 @@ import type { InlineKeyboardMarkup } from "../types";
 
 const API_BASE = "https://api.telegram.org/bot";
 
+/** Потолок ожидания по retry_after от Telegram, секунды. */
+const MAX_RETRY_AFTER_S = 30;
+
+/**
+ * Достаёт parameters.retry_after из тела ответа Telegram при 429.
+ * null — не удалось распарсить или значение некорректно.
+ */
+function parseRetryAfter(body: string): number | null {
+	try {
+		const data = JSON.parse(body) as { parameters?: { retry_after?: number } };
+		const s = data.parameters?.retry_after;
+		return typeof s === "number" && s > 0 ? s : null;
+	} catch {
+		return null;
+	}
+}
+
 /** Вызов метода Bot API с повторами при сетевых ошибках / 5xx. */
 async function callApi(
 	token: string,
@@ -15,6 +32,13 @@ async function callApi(
 	let lastError: unknown;
 
 	for (let attempt = 0; attempt < retries; attempt++) {
+		// Пауза перед повтором. При 429 Telegram сам говорит, сколько ждать
+		// (parameters.retry_after) — уважаем её (с потолком), иначе экспонента.
+		let waitMs: number | null = null;
+		// Постоянная ошибка (4xx кроме 429) — бросаем вне try, чтобы её не
+		// перехватил catch ниже и не превратил в повторяемую.
+		let fatal: Error | null = null;
+
 		try {
 			const res = await fetch(url, {
 				method: "POST",
@@ -28,15 +52,22 @@ async function callApi(
 			// 429/5xx — временные ошибки, повторяем; прочие 4xx — нет.
 			if (res.status !== 429 && res.status < 500) {
 				console.error(`Telegram ${method} → HTTP ${res.status}: ${text}`);
-				throw new Error(`Telegram API ${method}: HTTP ${res.status}`);
+				fatal = new Error(`Telegram API ${method}: HTTP ${res.status}`);
+			} else {
+				if (res.status === 429) {
+					const retryAfter = parseRetryAfter(text);
+					if (retryAfter !== null) waitMs = Math.min(retryAfter, MAX_RETRY_AFTER_S) * 1000;
+				}
+				lastError = new Error(`Telegram API ${method}: HTTP ${res.status} ${text}`);
 			}
-			lastError = new Error(`Telegram API ${method}: HTTP ${res.status} ${text}`);
 		} catch (err) {
 			lastError = err;
 		}
 
+		if (fatal) throw fatal;
+
 		if (attempt < retries - 1) {
-			await new Promise((r) => setTimeout(r, 300 * 2 ** attempt));
+			await new Promise((r) => setTimeout(r, waitMs ?? 300 * 2 ** attempt));
 		}
 	}
 

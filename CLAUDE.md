@@ -39,8 +39,9 @@
 ## Стек
 
 - **Cloudflare Workers** — рантайм (вебхук + cron)
-- **Workers KV** (`BOOK_CLUB_KV`) — подписчики и прогресс повторения
-- **D1** (`BOOK_CLUB_DB`, база `book-club-bot`) — брони тем и записи на встречи
+- **Workers KV** (`BOOK_CLUB_KV`) — подписчики рассылки
+- **D1** (`BOOK_CLUB_DB`, база `book-club-bot`) — брони тем, записи на встречи,
+  единый прогресс SM-2 (общий для бота и сайта)
 - **Cron Trigger** — ежедневная рассылка + напоминания о встречах
 - **TypeScript**, Wrangler 4, Vitest (`@cloudflare/vitest-pool-workers`)
 
@@ -67,10 +68,10 @@ src/
   types.ts                 — типы (Flashcard, Subscriber, CardProgress, Telegram*)
   env.d.ts                 — дополнение интерфейса Env секретами (BOT_TOKEN)
   lib/
-    api.ts                 — fetchFlashcards, fetchBookMeta (GitHub raw, с retry)
-    spaced-repetition.ts   — calculateNextReview, getDueCards (SM-2)
+    api.ts                 — fetchFlashcards, fetchIndex, fetchAllFlashcards (GitHub raw, с retry)
+    spaced-repetition.ts   — calculateNextReview, reviewFromQuality, selectDue (SM-2)
     telegram.ts            — sendMessage, editMessageText, answerCallback (с retry)
-    storage.ts             — работа с KV (подписчики, прогресс)
+    storage.ts             — работа с KV (подписчики рассылки)
     cards.ts               — рендеринг карточек, клавиатуры, sendDueCards
   commands/
     start.ts stop.ts today.ts status.ts
@@ -83,14 +84,17 @@ test/
 ## Хранилище (ключи KV)
 
 - `sub:<chatId>` → `Subscriber`
-- `progress:<chatId>:<cardId>` → `CardProgress`
+
+Прогресс карточек живёт **не в KV, а в D1** (таблица `card_progress`,
+ключ `<book>:<cardId>`) — общий для бота и сайта.
 
 ## Секреты и переменные
 
 - `BOT_TOKEN` — токен Telegram-бота. Задаётся: `wrangler secret put BOT_TOKEN`.
   **Никогда не коммитить токен в код или конфиг.**
-- `WEBHOOK_SECRET` (необязательно) — секрет для проверки заголовка
-  `X-Telegram-Bot-Api-Secret-Token` вебхука.
+- `WEBHOOK_SECRET` (**обязателен**) — секрет для проверки заголовка
+  `X-Telegram-Bot-Api-Secret-Token` вебхука. Проверка fail-closed: без него
+  вебхук отвечает 500. Тот же секрет передаётся в `setWebhook` (`secret_token`).
 - `ADMIN_CHAT_ID` — chat_id админа для уведомлений о заявках
   (`wrangler secret put ADMIN_CHAT_ID`).
 - `ADMIN_API_TOKEN` — токен админских эндпоинтов API; его же админ вводит

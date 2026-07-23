@@ -1,23 +1,6 @@
 // Общие типы бота «Книжного клуба».
 
-/** Идентификатор книги в репозитории book-club-data (папка books/<id>). */
-export const BOOK_ID = "docker-up-and-running";
-
 // ── Данные книг ────────────────────────────────────────────────────────────
-
-/** Метаданные книги (meta.json). */
-export interface BookMeta {
-	id: string;
-	title: string;
-	title_original?: string;
-	edition?: number;
-	authors: { name: string; avatar?: string }[];
-	status?: string;
-	cover?: string;
-	tags?: string[];
-	description?: string;
-	total_chapters?: number;
-}
 
 interface FlashcardBase {
 	id: string;
@@ -138,7 +121,10 @@ export interface Subscriber {
 	subscribedAt: number;
 }
 
-/** Прогресс по карточке (SM-2). Ключ KV: `progress:<chatId>:<cardId>`. */
+/**
+ * Прогресс по карточке (SM-2). Хранится в D1 (таблица `card_progress`,
+ * см. lib/db.ts); cardId — композитный ключ «<book>:<cardId>».
+ */
 export interface CardProgress {
 	cardId: string;
 	/** Число успешных повторений подряд. */
@@ -188,10 +174,21 @@ export interface TelegramCallbackQuery {
 	data?: string;
 }
 
+/**
+ * Изменение статуса бота в чате (my_chat_member): по нему узнаём,
+ * что пользователь заблокировал бота (status = kicked/banned).
+ */
+export interface TelegramChatMemberUpdated {
+	chat: TelegramChat;
+	from?: TelegramUser;
+	new_chat_member: { status: string };
+}
+
 export interface TelegramUpdate {
 	update_id: number;
 	message?: TelegramMessage;
 	callback_query?: TelegramCallbackQuery;
+	my_chat_member?: TelegramChatMemberUpdated;
 }
 
 // ── Разметка кнопок ──────────────────────────────────────────────────────────

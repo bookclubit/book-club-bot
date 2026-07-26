@@ -231,17 +231,14 @@ export function renderAnnouncement(kind: AnnounceKind, ctx: AnnounceContext): st
 export const CAPTION_LIMIT = 1024;
 
 /**
- * Момент публикации поста: анонс — сразу, афиша дня — в 10:00 МСК в день
- * встречи (если это время уже прошло, постим сразу), напоминание — старт минус
- * 5 минут.
+ * Как называется пост и когда его обычно публикуют. Это подсказки для CMS,
+ * а не расписание: момент публикации выбирает админ.
  */
-export function runAtFor(kind: AnnounceKind, event: AnnounceEvent, now = Date.now()): number {
-	const start = Date.parse(`${event.date}T${event.time}:00+03:00`);
-	if (kind === "announce") return now;
-	if (kind === "soon") return start - 5 * 60 * 1000;
-	const morning = Date.parse(`${event.date}T10:00:00+03:00`);
-	return Math.max(morning, now);
-}
+export const KIND_INFO: Record<AnnounceKind, { title: string; when: string }> = {
+	announce: { title: "Анонс", when: "сразу после создания встречи" },
+	day: { title: "Афиша дня", when: "утром в день встречи" },
+	soon: { title: "Напоминание", when: "за 5–10 минут до начала" },
+};
 
 /** Темы главы + спикеры из заявок: одна форма для всех трёх постов. */
 export function buildTopics(

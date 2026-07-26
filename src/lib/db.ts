@@ -182,19 +182,31 @@ const SCHEMA = [
 		reviewed INTEGER NOT NULL DEFAULT 0,
 		updated_at INTEGER NOT NULL
 	)`,
-	// План постов о встрече в группу клуба: анонс, афиша в день встречи и
-	// напоминание за 5 минут. Поля встречи храним снимком (event JSON), потому
-	// что в момент анонса встречи ещё нет в book-club-data — она в открытом PR.
-	`CREATE TABLE IF NOT EXISTS announcements (
+	// Группы и каналы клуба, куда бот может постить: добавляются командой
+	// /anons_here в самой группе (от админа), убираются /anons_stop.
+	`CREATE TABLE IF NOT EXISTS announce_chats (
+		chat_id INTEGER PRIMARY KEY,
+		title TEXT,
+		added_at INTEGER NOT NULL
+	)`,
+	// Черновики постов о встрече. Расписания нет: бот готовит текст, публикует
+	// админ из CMS и сам выбирает группы. Поля встречи храним снимком (event
+	// JSON) — в момент подготовки встреча ещё в открытом PR.
+	`CREATE TABLE IF NOT EXISTS post_drafts (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		event_id TEXT NOT NULL,
 		kind TEXT NOT NULL,
-		chat_id INTEGER NOT NULL,
-		run_at INTEGER NOT NULL,
 		event TEXT NOT NULL,
+		text TEXT NOT NULL,
+		edited INTEGER NOT NULL DEFAULT 0,
+		has_poster INTEGER NOT NULL DEFAULT 0,
 		poster_file_id TEXT,
-		message_id INTEGER,
+		status TEXT NOT NULL DEFAULT 'pending',
 		sent_at INTEGER,
-		PRIMARY KEY (event_id, kind)
+		sent_to TEXT,
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL,
+		UNIQUE (event_id, kind)
 	)`,
 	// Настройки бота, задаваемые из чата (например чат для анонсов).
 	`CREATE TABLE IF NOT EXISTS bot_settings (
@@ -853,114 +865,179 @@ export async function clearSession(db: D1Database, userId: number): Promise<void
 	await db.prepare("DELETE FROM study_session WHERE user_id = ?").bind(userId).run();
 }
 
-// ── Анонсы встреч в группу клуба ─────────────────────────────────────────────
 
-export interface AnnouncementRow {
-	event_id: string;
-	kind: string;
+// ── Группы клуба для постов ──────────────────────────────────────────────────
+
+export interface AnnounceChat {
 	chat_id: number;
-	run_at: number;
-	event: string;
-	poster_file_id: string | null;
-	message_id: number | null;
-	sent_at: number | null;
+	title: string | null;
+	added_at: number;
 }
 
-/**
- * Планирует пост (или перезаписывает план, если встречу правят). Уже
- * опубликованные посты не трогаем: sent_at сохраняется, повторной отправки
- * не будет.
- */
-export async function planAnnouncement(
+/** Ключ настройки, где раньше жил единственный чат анонсов (до нескольких групп). */
+export const ANNOUNCE_CHAT_KEY = "announce_chat_id";
+
+export async function addAnnounceChat(
 	db: D1Database,
-	row: {
-		eventId: string;
-		kind: string;
-		chatId: number;
-		runAt: number;
-		event: string;
-		posterFileId?: string | null;
-	},
+	chatId: number,
+	title?: string | null,
 ): Promise<void> {
 	await ensureSchema(db);
 	await db
 		.prepare(
-			`INSERT INTO announcements (event_id, kind, chat_id, run_at, event, poster_file_id)
-			 VALUES (?, ?, ?, ?, ?, ?)
-			 ON CONFLICT(event_id, kind) DO UPDATE SET
-				chat_id = excluded.chat_id,
-				run_at = CASE WHEN announcements.sent_at IS NULL THEN excluded.run_at ELSE announcements.run_at END,
-				event = excluded.event,
-				poster_file_id = COALESCE(excluded.poster_file_id, announcements.poster_file_id)`,
+			`INSERT INTO announce_chats (chat_id, title, added_at) VALUES (?, ?, ?)
+			 ON CONFLICT(chat_id) DO UPDATE SET title = COALESCE(excluded.title, announce_chats.title)`,
 		)
-		.bind(row.eventId, row.kind, row.chatId, row.runAt, row.event, row.posterFileId ?? null)
+		.bind(chatId, title ?? null, Date.now())
 		.run();
 }
 
-/** Посты, которым пора выходить: время наступило, отправки ещё не было. */
-export async function listDueAnnouncements(
-	db: D1Database,
-	now: number,
-): Promise<AnnouncementRow[]> {
+export async function removeAnnounceChat(db: D1Database, chatId: number): Promise<boolean> {
 	await ensureSchema(db);
-	const { results } = await db
-		.prepare(
-			`SELECT * FROM announcements
-			 WHERE sent_at IS NULL AND run_at <= ?
-			 ORDER BY run_at`,
-		)
-		.bind(now)
-		.all<AnnouncementRow>();
-	return results ?? [];
-}
-
-/**
- * Отмечает пост отправленным. Возвращает false, если его уже отметил
- * параллельный запуск cron — тогда второй раз не публикуем.
- */
-export async function markAnnouncementSent(
-	db: D1Database,
-	eventId: string,
-	kind: string,
-	messageId: number | null,
-	sentAt = Date.now(),
-): Promise<boolean> {
-	await ensureSchema(db);
-	const result = await db
-		.prepare(
-			`UPDATE announcements SET sent_at = ?, message_id = ?
-			 WHERE event_id = ? AND kind = ? AND sent_at IS NULL`,
-		)
-		.bind(sentAt, messageId, eventId, kind)
-		.run();
+	const result = await db.prepare("DELETE FROM announce_chats WHERE chat_id = ?").bind(chatId).run();
 	return (result.meta.changes ?? 0) > 0;
 }
 
-/** Афиша, загруженная для другого поста этой встречи (file_id переиспользуем). */
-export async function findPosterFileId(
-	db: D1Database,
-	eventId: string,
-	kind: string,
-): Promise<string | null> {
+/**
+ * Группы клуба. Если таблица пуста, а старая настройка с одним чатом осталась —
+ * переносим её: группа, добавленная до появления нескольких чатов, не теряется.
+ */
+export async function listAnnounceChats(db: D1Database): Promise<AnnounceChat[]> {
 	await ensureSchema(db);
-	const row = await db
-		.prepare("SELECT poster_file_id FROM announcements WHERE event_id = ? AND kind = ?")
-		.bind(eventId, kind)
-		.first<{ poster_file_id: string | null }>();
-	return row?.poster_file_id ?? null;
+	const { results } = await db
+		.prepare("SELECT * FROM announce_chats ORDER BY added_at")
+		.all<AnnounceChat>();
+	if (results.length > 0) return results;
+
+	const legacy = await getBotSetting(db, ANNOUNCE_CHAT_KEY);
+	const chatId = Number(legacy);
+	if (legacy === null || !Number.isFinite(chatId) || chatId === 0) return [];
+	await addAnnounceChat(db, chatId, null);
+	const migrated = await db
+		.prepare("SELECT * FROM announce_chats ORDER BY added_at")
+		.all<AnnounceChat>();
+	return migrated.results ?? [];
 }
 
-export async function setPosterFileId(
+// ── Черновики постов о встрече ───────────────────────────────────────────────
+
+export interface PostDraft {
+	id: number;
+	event_id: string;
+	kind: string;
+	/** Снимок полей встречи (JSON) — из него пересобирается текст. */
+	event: string;
+	text: string;
+	edited: number;
+	has_poster: number;
+	poster_file_id: string | null;
+	status: "pending" | "sent";
+	sent_at: number | null;
+	/** JSON [{chat_id, message_id}] — куда пост уже ушёл. */
+	sent_to: string | null;
+	created_at: number;
+	updated_at: number;
+}
+
+/**
+ * Создаёт черновик или обновляет его под новые поля встречи. Текст, который
+ * правили руками (`edited = 1`), не затирается: правка встречи в CMS не должна
+ * молча выбрасывать формулировки админа. Уже отправленный пост не меняем.
+ */
+export async function upsertPostDraft(
 	db: D1Database,
-	eventId: string,
-	kind: string,
+	draft: {
+		eventId: string;
+		kind: string;
+		event: string;
+		text: string;
+		hasPoster?: boolean;
+	},
+): Promise<PostDraft | null> {
+	await ensureSchema(db);
+	const now = Date.now();
+	return db
+		.prepare(
+			`INSERT INTO post_drafts (event_id, kind, event, text, has_poster, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(event_id, kind) DO UPDATE SET
+				event = excluded.event,
+				text = CASE
+					WHEN post_drafts.edited = 1 OR post_drafts.status = 'sent' THEN post_drafts.text
+					ELSE excluded.text END,
+				has_poster = CASE WHEN excluded.has_poster = 1 THEN 1 ELSE post_drafts.has_poster END,
+				updated_at = excluded.updated_at
+			 RETURNING *`,
+		)
+		.bind(draft.eventId, draft.kind, draft.event, draft.text, draft.hasPoster ? 1 : 0, now, now)
+		.first<PostDraft>();
+}
+
+export async function listPostDrafts(db: D1Database): Promise<PostDraft[]> {
+	await ensureSchema(db);
+	const { results } = await db
+		.prepare(
+			`SELECT * FROM post_drafts
+			 ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, event_id, id`,
+		)
+		.all<PostDraft>();
+	return results ?? [];
+}
+
+export async function getPostDraft(db: D1Database, id: number): Promise<PostDraft | null> {
+	await ensureSchema(db);
+	return db.prepare("SELECT * FROM post_drafts WHERE id = ?").bind(id).first<PostDraft>();
+}
+
+/** Правка текста из CMS: помечаем `edited`, чтобы пересборка его не тронула. */
+export async function setPostDraftText(
+	db: D1Database,
+	id: number,
+	text: string,
+	edited = true,
+): Promise<PostDraft | null> {
+	await ensureSchema(db);
+	return db
+		.prepare(
+			`UPDATE post_drafts SET text = ?, edited = ?, updated_at = ?
+			 WHERE id = ? AND status = 'pending' RETURNING *`,
+		)
+		.bind(text, edited ? 1 : 0, Date.now(), id)
+		.first<PostDraft>();
+}
+
+export async function setPostDraftPoster(
+	db: D1Database,
+	id: number,
 	fileId: string,
 ): Promise<void> {
 	await ensureSchema(db);
 	await db
-		.prepare("UPDATE announcements SET poster_file_id = ? WHERE event_id = ? AND kind = ?")
-		.bind(fileId, eventId, kind)
+		.prepare("UPDATE post_drafts SET poster_file_id = ?, updated_at = ? WHERE id = ?")
+		.bind(fileId, Date.now(), id)
 		.run();
+}
+
+/** Отмечает пост опубликованным и запоминает, в какие чаты он ушёл. */
+export async function markPostDraftSent(
+	db: D1Database,
+	id: number,
+	sentTo: { chat_id: number; message_id: number | null }[],
+): Promise<PostDraft | null> {
+	await ensureSchema(db);
+	const now = Date.now();
+	return db
+		.prepare(
+			`UPDATE post_drafts SET status = 'sent', sent_at = ?, sent_to = ?, updated_at = ?
+			 WHERE id = ? RETURNING *`,
+		)
+		.bind(now, JSON.stringify(sentTo), now, id)
+		.first<PostDraft>();
+}
+
+export async function deletePostDraft(db: D1Database, id: number): Promise<void> {
+	await ensureSchema(db);
+	await db.prepare("DELETE FROM post_drafts WHERE id = ?").bind(id).run();
 }
 
 // ── Настройки бота (задаются командами в чате) ───────────────────────────────
@@ -983,26 +1060,4 @@ export async function setBotSetting(db: D1Database, key: string, value: string):
 		)
 		.bind(key, value, Date.now())
 		.run();
-}
-
-/** Чат для анонсов встреч (ставится командой /anons_here в группе клуба). */
-export const ANNOUNCE_CHAT_KEY = "announce_chat_id";
-
-export async function getAnnounceChatId(db: D1Database): Promise<number | null> {
-	const raw = await getBotSetting(db, ANNOUNCE_CHAT_KEY);
-	const id = Number(raw);
-	return raw !== null && Number.isFinite(id) ? id : null;
-}
-
-/** Строка плана публикации (или null, если такого поста не планировали). */
-export async function getAnnouncement(
-	db: D1Database,
-	eventId: string,
-	kind: string,
-): Promise<AnnouncementRow | null> {
-	await ensureSchema(db);
-	return db
-		.prepare("SELECT * FROM announcements WHERE event_id = ? AND kind = ?")
-		.bind(eventId, kind)
-		.first<AnnouncementRow>();
 }

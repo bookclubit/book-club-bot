@@ -15,9 +15,11 @@ import {
 	type TgUser,
 } from "./lib/auth";
 import {
+	addAnnounceChat,
 	assignClaim,
 	cardKey,
 	createSpeakerClaim,
+	deletePostDraft,
 	DAILY_CARD_OPTIONS,
 	deleteSpeakerClaim,
 	getCardProgress,
@@ -27,26 +29,29 @@ import {
 	getMembershipRequestById,
 	getSpeakerClaim,
 	getUser,
+	listAnnounceChats,
 	listMembershipRequests,
+	listPostDrafts,
 	listRegistrations,
 	listSpeakerClaims,
 	markReminderSent,
 	releaseClaimByTopic,
+	removeAnnounceChat,
 	saveCardProgress,
 	saveMembershipRequest,
 	setClaimSlides,
-	setBotSetting,
 	setDailyCards,
 	setMembershipStatus,
+	setPostDraftText,
 	updateSpeakerClaim,
 	upsertUser,
 	wasReminderSent,
-	ANNOUNCE_CHAT_KEY,
 } from "./lib/db";
 import { speakerAccess } from "./lib/members";
 import { fetchPlanTopics } from "./lib/plan";
-import { AnnounceChatNotSet, announceEvent, runDueAnnouncements } from "./lib/announcer";
-import type { AnnounceEvent } from "./lib/announce";
+import { NoAnnounceChats, prepareDrafts, publishDraft, refreshDraft } from "./lib/announcer";
+import { KIND_INFO, type AnnounceEvent } from "./lib/announce";
+import type { AnnounceKind } from "./types";
 import { initialProgress, reviewFromQuality } from "./lib/spaced-repetition";
 import { startStudy } from "./lib/study";
 import { eventDateFromPath, eventStartMs, mskToday, renderEventLinks } from "./lib/events";
@@ -82,35 +87,53 @@ const UNKNOWN_COMMAND =
 	"Не знаю такой команды 🤔\n\nСписок всех команд — /help";
 
 /**
- * `/anons_here` — назначить этот чат для анонсов встреч. Работает только в
- * группе или канале и только от администратора чата: иначе любой участник
- * смог бы перенаправить анонсы клуба к себе.
+ * `/anons_here` и `/anons_stop` — подключить этот чат к постам о встречах или
+ * отключить. Только в группе/канале и только от администратора чата: иначе
+ * любой участник смог бы перенаправить посты клуба к себе.
  */
-async function handleAnnounceHere(env: Env, message: TelegramMessage): Promise<void> {
+async function handleAnnounceHere(
+	env: Env,
+	message: TelegramMessage,
+	action: "add" | "remove",
+): Promise<void> {
 	const chatId = message.chat.id;
-	const isPrivate = message.chat.type === "private";
-	if (isPrivate) {
+	if (message.chat.type === "private") {
 		await sendMessage(
 			env.BOT_TOKEN,
 			chatId,
-			"Эту команду нужно отправить в группе или канале клуба — там, где бот будет постить анонсы встреч.",
+			"Эту команду нужно отправить в группе или канале клуба — там, где бот будет постить о встречах.",
 		);
 		return;
 	}
 
 	const userId = message.from?.id;
 	if (!userId || !(await isChatAdmin(env.BOT_TOKEN, chatId, userId))) {
-		await sendMessage(env.BOT_TOKEN, chatId, "Назначить чат для анонсов может только администратор.");
+		await sendMessage(env.BOT_TOKEN, chatId, "Подключить или отключить чат может только администратор.");
 		return;
 	}
 
-	await setBotSetting(env.BOOK_CLUB_DB, ANNOUNCE_CHAT_KEY, String(chatId));
+	if (action === "remove") {
+		const removed = await removeAnnounceChat(env.BOOK_CLUB_DB, chatId);
+		await sendMessage(
+			env.BOT_TOKEN,
+			chatId,
+			removed
+				? "Готово: посты о встречах здесь больше не публикуются."
+				: "Этот чат и не был подключён.",
+		);
+		return;
+	}
+
+	await addAnnounceChat(env.BOOK_CLUB_DB, chatId, message.chat.title ?? null);
+	const chats = await listAnnounceChats(env.BOOK_CLUB_DB);
 	await sendMessage(
 		env.BOT_TOKEN,
 		chatId,
-		"✅ Готово: анонсы встреч будут выходить здесь.\n\n" +
-			"Дальше — создайте встречу в CMS: анонс выйдет сразу, афиша дня — в 10:00 МСК в день встречи, " +
-			"напоминание — за 5 минут до начала.",
+		"✅ Чат подключён к постам о встречах" +
+			(chats.length > 1 ? ` (всего групп: ${chats.length})` : "") +
+			".\n\nПосты не выходят сами: создайте встречу в CMS — бот подготовит анонс, афишу дня " +
+			"и напоминание, а вы посмотрите тексты в разделе «Посты» и опубликуете, куда нужно.\n\n" +
+			"Отключить этот чат — /anons_stop",
 	);
 }
 
@@ -127,7 +150,7 @@ function parseCommand(text: string): string | null {
  * отключает для админов режим приватности), и реакция на них была бы спамом
  * в чате клуба. Личные диалоги, карточки и заявки живут только в личке.
  */
-const GROUP_COMMANDS = new Set(["anons_here"]);
+const GROUP_COMMANDS = new Set(["anons_here", "anons_stop"]);
 
 /** Команда для группы, если сообщение — именно она. Иначе null (молчим). */
 export function groupCommand(text?: string): string | null {
@@ -140,7 +163,9 @@ async function routeMessage(env: Env, message: TelegramMessage): Promise<void> {
 
 	// Группа или канал: только свои команды, на болтовню участников не реагируем.
 	if (message.chat.type !== "private") {
-		if (groupCommand(text) === "anons_here") await handleAnnounceHere(env, message);
+		const command = groupCommand(text);
+		if (command === "anons_here") await handleAnnounceHere(env, message, "add");
+		if (command === "anons_stop") await handleAnnounceHere(env, message, "remove");
 		return;
 	}
 
@@ -187,7 +212,9 @@ async function routeMessage(env: Env, message: TelegramMessage): Promise<void> {
 		case "help":
 			return handleHelp(env, message);
 		case "anons_here":
-			return handleAnnounceHere(env, message);
+			return handleAnnounceHere(env, message, "add");
+		case "anons_stop":
+			return handleAnnounceHere(env, message, "remove");
 		default:
 			await sendMessage(env.BOT_TOKEN, message.chat.id, UNKNOWN_COMMAND);
 	}
@@ -448,7 +475,8 @@ const BOT_COMMANDS = [
 	{ command: "speaker", description: "Выступить с докладом или вступить в клуб" },
 	{ command: "cancel", description: "Прервать заявку" },
 	{ command: "help", description: "Помощь и список команд" },
-	{ command: "anons_here", description: "Постить анонсы встреч в этот чат (админ)" },
+	{ command: "anons_here", description: "Подключить этот чат к постам о встречах (админ)" },
+	{ command: "anons_stop", description: "Отключить посты о встречах в этом чате (админ)" },
 	{ command: "start", description: "Подписка на ежедневные карточки" },
 	{ command: "stop", description: "Отписаться от карточек" },
 ];
@@ -483,11 +511,10 @@ function decodePoster(base64?: string | null): Uint8Array | undefined {
 }
 
 /**
- * Анонс встречи в группу клуба: POST /api/admin/announce.
+ * Подготовка постов о встрече: POST /api/admin/announce.
  * Тело — { event, posters: { announce?, day? } }, где event повторяет схему
  * events/*.json (CMS присылает поля формы: встречи ещё нет в book-club-data,
- * она в открытом PR). Бот сразу постит анонс и планирует афишу дня и
- * напоминание за 5 минут.
+ * она в открытом PR). Бот только готовит черновики — публикует админ из CMS.
  */
 async function handleAdminAnnounce(env: Env, request: Request): Promise<Response> {
 	let body: { event?: AnnounceEvent; posters?: { announce?: string; day?: string } };
@@ -503,18 +530,110 @@ async function handleAdminAnnounce(env: Env, request: Request): Promise<Response
 	}
 
 	try {
-		const sent = await announceEvent(env, event, {
+		const result = await prepareDrafts(env, event, {
 			announce: decodePoster(body.posters?.announce),
 			day: decodePoster(body.posters?.day),
 		});
-		return json({ ok: true, ...sent });
+		return json({ ok: true, ...result });
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		console.error(`Не удалось анонсировать ${event.id}:`, err);
-		// Чат не настроен — это ошибка настройки, а не сбой: 409, чтобы CMS
-		// показала осмысленную подсказку вместо «что-то пошло не так».
-		return json({ error: message }, message.includes("Чат для анонсов") ? 409 : 502);
+		console.error(`Не удалось подготовить посты о ${event.id}:`, err);
+		return json({ error: message }, 502);
 	}
+}
+
+/** Черновики постов и группы клуба для CMS: GET /api/admin/posts. */
+async function handleAdminPosts(env: Env): Promise<Response> {
+	const [posts, chats] = await Promise.all([
+		listPostDrafts(env.BOOK_CLUB_DB),
+		listAnnounceChats(env.BOOK_CLUB_DB),
+	]);
+	return json({
+		posts: posts.map((p) => ({
+			id: p.id,
+			event_id: p.event_id,
+			kind: p.kind,
+			kind_title: KIND_INFO[p.kind as AnnounceKind]?.title ?? p.kind,
+			kind_when: KIND_INFO[p.kind as AnnounceKind]?.when ?? "",
+			// Заголовок и дата встречи — чтобы CMS не разбирала снимок сама.
+			event_title: safeEventField(p.event, "title"),
+			event_date: safeEventField(p.event, "date"),
+			event_time: safeEventField(p.event, "time"),
+			text: p.text,
+			edited: p.edited === 1,
+			has_poster: p.has_poster === 1 || Boolean(p.poster_file_id),
+			status: p.status,
+			sent_at: p.sent_at,
+			sent_to: p.sent_to ? (JSON.parse(p.sent_to) as unknown) : null,
+			updated_at: p.updated_at,
+		})),
+		chats,
+	});
+}
+
+/** Поле из снимка встречи; снимок писали мы, но JSON мог устареть — не падаем. */
+function safeEventField(snapshot: string, field: string): string | null {
+	try {
+		const parsed = JSON.parse(snapshot) as Record<string, unknown>;
+		const value = parsed[field];
+		return typeof value === "string" ? value : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Управление постами из CMS: POST /api/admin/posts.
+ *   { action: "publish", id, chat_ids? } — опубликовать (по умолчанию во все группы)
+ *   { action: "text", id, text }         — сохранить правку текста
+ *   { action: "refresh", id }            — пересобрать текст из данных клуба
+ *   { action: "delete", id }             — убрать черновик
+ */
+async function handleAdminPostAction(env: Env, request: Request): Promise<Response> {
+	let body: { action?: string; id?: number; text?: string; chat_ids?: number[] };
+	try {
+		body = (await request.json()) as typeof body;
+	} catch {
+		return json({ error: "невалидный JSON" }, 400);
+	}
+	const id = Number(body.id);
+	if (!Number.isFinite(id) || id <= 0) return json({ error: "нужен id черновика" }, 400);
+
+	if (body.action === "text") {
+		const text = (body.text ?? "").trim();
+		if (!text) return json({ error: "текст поста не может быть пустым" }, 400);
+		const draft = await setPostDraftText(env.BOOK_CLUB_DB, id, text);
+		if (!draft) return json({ error: "черновик не найден или уже опубликован" }, 404);
+		return json({ ok: true });
+	}
+
+	if (body.action === "refresh") {
+		const draft = await refreshDraft(env, id);
+		if (!draft) return json({ error: "черновик не найден" }, 404);
+		return json({ ok: true, text: draft.text });
+	}
+
+	if (body.action === "delete") {
+		await deletePostDraft(env.BOOK_CLUB_DB, id);
+		return json({ ok: true });
+	}
+
+	if (body.action === "publish") {
+		try {
+			const result = await publishDraft(env, id, body.chat_ids);
+			// Ни одна группа не приняла пост — это ошибка, кнопка должна остаться.
+			if (result.sentTo.length === 0) {
+				return json({ error: result.errors.join("; ") || "пост не ушёл ни в одну группу" }, 502);
+			}
+			return json({ ok: true, sent_to: result.sentTo, errors: result.errors });
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			// Групп нет — это настройка, а не сбой отправки.
+			return json({ error: message }, err instanceof NoAnnounceChats ? 409 : 502);
+		}
+	}
+
+	return json({ error: "action: publish | text | refresh | delete" }, 400);
 }
 
 // ── Участие в клубе: заявки и брони тем (для miniapp и CMS) ───────────────────
@@ -862,6 +981,12 @@ async function routeApi(env: Env, request: Request, url: URL): Promise<Response>
 		if (url.pathname === "/api/admin/announce" && request.method === "POST") {
 			return handleAdminAnnounce(env, request);
 		}
+		if (url.pathname === "/api/admin/posts" && request.method === "GET") {
+			return handleAdminPosts(env);
+		}
+		if (url.pathname === "/api/admin/posts" && request.method === "POST") {
+			return handleAdminPostAction(env, request);
+		}
 	}
 	return json({ error: "не найдено" }, 404);
 }
@@ -1025,15 +1150,11 @@ export default {
 			);
 			return;
 		}
-		// Каждые 5 минут: «встреча началась», афиша дня и напоминание за 5 минут.
+		// Каждые 5 минут: «встреча началась» тем, кто записался. Посты в группы
+		// по расписанию не выходят — их публикует админ из CMS.
 		ctx.waitUntil(
 			runTimedReminders(env).catch((err) =>
 				console.error("Ошибка напоминаний о встречах:", err),
-			),
-		);
-		ctx.waitUntil(
-			runDueAnnouncements(env).catch((err) =>
-				console.error("Ошибка постов о встречах:", err),
 			),
 		);
 	},

@@ -171,6 +171,8 @@ export interface TelegramChat {
 	type: string;
 	first_name?: string;
 	username?: string;
+	/** Название группы или канала (в личке отсутствует). */
+	title?: string;
 }
 
 export interface TelegramMessage {

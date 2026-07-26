@@ -12,28 +12,31 @@ import {
 	selectDue,
 } from "../src/lib/spaced-repetition";
 import { eventDateFromPath, eventPathById } from "../src/lib/events";
-import {
-	buildTopics,
-	renderAnnounce,
-	renderDay,
-	renderSoon,
-	runAtFor,
-} from "../src/lib/announce";
+import { buildTopics, renderAnnounce, renderDay, renderSoon } from "../src/lib/announce";
+import { prepareDrafts, publishDraft, refreshDraft } from "../src/lib/announcer";
 import { findSpeakerByUsername, telegramHandle } from "../src/lib/speakers";
 import {
+	addAnnounceChat,
+	ANNOUNCE_CHAT_KEY,
 	assignClaim,
 	cardKey,
 	createSpeakerClaim,
 	deleteSpeakerClaim,
+	getPostDraft,
 	getSpeakerProfile,
+	listAnnounceChats,
 	listMembershipRequests,
+	listPostDrafts,
 	listSpeakerClaims,
 	releaseClaimByTopic,
+	removeAnnounceChat,
 	resetSchemaCacheForTests,
 	saveMembershipRequest,
 	saveSpeakerIdentity,
+	setBotSetting,
 	setClaimSlides,
 	setMembershipStatus,
+	setPostDraftText,
 	type MembershipRequest,
 } from "../src/lib/db";
 import { speakerAccess } from "../src/lib/members";
@@ -561,18 +564,6 @@ describe("Посты о встрече в группу клуба", () => {
 		expect(text).toContain("&lt;b&gt;взлом&lt;/b&gt;");
 	});
 
-	it("расписание: анонс сразу, афиша в 10:00 МСК, напоминание за 5 минут", () => {
-		const now = Date.parse("2026-07-20T09:00:00+03:00");
-		expect(runAtFor("announce", talkEvent, now)).toBe(now);
-		expect(runAtFor("day", talkEvent, now)).toBe(Date.parse("2026-07-24T10:00:00+03:00"));
-		expect(runAtFor("soon", talkEvent, now)).toBe(Date.parse("2026-07-24T17:55:00+03:00"));
-	});
-
-	it("если 10:00 уже прошло, дневной пост не уходит в прошлое", () => {
-		const now = Date.parse("2026-07-24T15:00:00+03:00");
-		expect(runAtFor("day", talkEvent, now)).toBe(now);
-	});
-
 	it("спикер берётся только из подтверждённой заявки", () => {
 		const topics = buildTopics(
 			[
@@ -589,21 +580,70 @@ describe("Посты о встрече в группу клуба", () => {
 		expect(topics[1].speaker).toBeUndefined();
 	});
 
-	it("анонс без настроенного чата отвечает 409 с подсказкой", async () => {
+	// Для черновиков берём встречу без книги и главы: тогда рендер не идёт
+	// в book-club-data и тесты не зависят от сети.
+	const draftEvent = { ...talkEvent, book_id: undefined, chapter: undefined };
+
+	it("готовит черновики, не публикуя их и не требуя групп", async () => {
 		// Хранилище D1 изолируется между тестами, а флаг «схема создана» живёт
 		// в модуле — сбрасываем, иначе таблиц в свежей базе не будет.
 		resetSchemaCacheForTests();
-		const TOKEN = "test-admin-token";
-		const request = new IncomingRequest("http://example.com/api/admin/announce", {
-			method: "POST",
-			headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
-			body: JSON.stringify({ event: talkEvent }),
-		});
-		const ctxExec = createExecutionContext();
-		const res = await worker.fetch(request, { ...env, ADMIN_API_TOKEN: TOKEN }, ctxExec);
-		await waitOnExecutionContext(ctxExec);
-		expect(res.status).toBe(409);
-		expect(await res.text()).toContain("anons_here");
+		const db = env.BOOK_CLUB_DB;
+
+		const { drafts } = await prepareDrafts(env, draftEvent, {});
+		expect(drafts).toBe(3);
+
+		const all = await listPostDrafts(db);
+		expect(all.map((d) => d.kind).sort()).toEqual(["announce", "day", "soon"]);
+		// Ничего не отправлено: публикацию запускает админ из CMS.
+		expect(all.every((d) => d.status === "pending" && d.sent_at === null)).toBe(true);
+		expect(all.find((d) => d.kind === "announce")?.text).toContain("Книжный клуб №114");
+
+		// Правку текста повторная подготовка встречи не затирает.
+		const announce = all.find((d) => d.kind === "announce")!;
+		await setPostDraftText(db, announce.id, "Свой текст админа");
+		await prepareDrafts(env, draftEvent, {});
+		const after = await getPostDraft(db, announce.id);
+		expect(after?.text).toBe("Свой текст админа");
+		expect(after?.edited).toBe(1);
+
+		// Пересборка возвращает текст «как из данных» и снимает флаг правки.
+		const refreshed = await refreshDraft(env, announce.id);
+		expect(refreshed?.text).toContain("Книжный клуб №114");
+		expect(refreshed?.edited).toBe(0);
+	});
+
+	it("публикация без подключённых групп — понятная ошибка, а не сбой", async () => {
+		resetSchemaCacheForTests();
+		await prepareDrafts(env, draftEvent, {});
+		const draft = (await listPostDrafts(env.BOOK_CLUB_DB))[0];
+		await expect(publishDraft(env, draft.id)).rejects.toThrow(/anons_here/);
+	});
+
+	it("группы: /anons_here добавляет, /anons_stop убирает", async () => {
+		resetSchemaCacheForTests();
+		const db = env.BOOK_CLUB_DB;
+		await addAnnounceChat(db, -1001, "Книжный клуб");
+		await addAnnounceChat(db, -1002, "Тестовая группа");
+		// Повторное подключение той же группы не создаёт дубль.
+		await addAnnounceChat(db, -1001, null);
+
+		const chats = await listAnnounceChats(db);
+		expect(chats.map((c) => c.chat_id)).toEqual([-1001, -1002]);
+		// Название не затирается пустым при повторном /anons_here.
+		expect(chats[0].title).toBe("Книжный клуб");
+
+		expect(await removeAnnounceChat(db, -1002)).toBe(true);
+		expect(await removeAnnounceChat(db, -1002)).toBe(false);
+		expect((await listAnnounceChats(db)).map((c) => c.chat_id)).toEqual([-1001]);
+	});
+
+	it("группа, подключённая до появления нескольких чатов, не теряется", async () => {
+		resetSchemaCacheForTests();
+		const db = env.BOOK_CLUB_DB;
+		await setBotSetting(db, ANNOUNCE_CHAT_KEY, "-1002793252927");
+		const chats = await listAnnounceChats(db);
+		expect(chats.map((c) => c.chat_id)).toEqual([-1002793252927]);
 	});
 })
 

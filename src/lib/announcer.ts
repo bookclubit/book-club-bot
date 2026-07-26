@@ -1,40 +1,43 @@
-// Публикация постов о встрече в группу клуба. Рендер живёт в announce.ts,
-// здесь — данные, отправка и план публикаций.
+// Посты о встрече: подготовка черновиков и публикация по команде из CMS.
+// Рендер текста живёт в announce.ts, здесь — данные, черновики и отправка.
 //
-// Почему снимок встречи хранится в D1: анонс выходит сразу после нажатия
+// Расписания нет намеренно: админ видит готовые тексты в CMS, при желании
+// правит их и сам решает, когда и в какие группы публиковать.
+//
+// Почему снимок встречи хранится в D1: черновики готовятся сразу после нажатия
 // «Создать pull request» в CMS, а в book-club-data встреча появится только
-// после мержа. Всё остальное (книга, темы, спикеры) берётся свежим на момент
-// каждого поста — поэтому дневная афиша уже знает подтверждённых спикеров.
+// после мержа. Книга, темы и спикеры берутся свежими при каждой пересборке
+// текста — поэтому дневная афиша знает подтверждённых позже спикеров.
 
 import {
 	buildTopics,
 	CAPTION_LIMIT,
 	renderAnnouncement,
-	runAtFor,
 	type AnnounceContext,
 	type AnnounceEvent,
 } from "./announce";
 import { fetchBookMeta, fetchChapter, fetchIndex } from "./api";
 import {
-	getAnnounceChatId,
-	getAnnouncement,
-	listDueAnnouncements,
+	getPostDraft,
+	listAnnounceChats,
 	listSpeakerClaims,
-	markAnnouncementSent,
-	planAnnouncement,
-	setPosterFileId,
-	type AnnouncementRow,
+	markPostDraftSent,
+	setPostDraftPoster,
+	setPostDraftText,
+	upsertPostDraft,
+	type PostDraft,
 } from "./db";
-import { sendPhotoByFileId, sendPhotoBytes, sendPost, type SentPost } from "./telegram";
+import { sendPhotoByFileId, sendPhotoBytes, sendPost } from "./telegram";
 import type { AnnounceKind } from "../types";
 
-const KINDS: AnnounceKind[] = ["announce", "day", "soon"];
+/** Три поста на встречу: анонс, афиша в день встречи, напоминание перед началом. */
+export const POST_KINDS: AnnounceKind[] = ["announce", "day", "soon"];
 
-/** Чат для анонсов не назначен — это настройка, а не сбой отправки. */
-export class AnnounceChatNotSet extends Error {
+/** В клубе не задана ни одна группа — постить некуда (нужен /anons_here). */
+export class NoAnnounceChats extends Error {
 	constructor() {
-		super("Чат для анонсов не задан: отправьте /anons_here в группе клуба от имени администратора");
-		this.name = "AnnounceChatNotSet";
+		super("Нет групп для постов: отправьте /anons_here в группе клуба от имени администратора");
+		this.name = "NoAnnounceChats";
 	}
 }
 
@@ -81,163 +84,155 @@ export async function buildContext(env: Env, event: AnnounceEvent): Promise<Anno
 }
 
 /**
- * Отправляет пост: с афишей, если она есть, иначе текстом. Подпись к фото
- * ограничена 1024 символами — длинный текст уходит отдельным сообщением,
- * чтобы ничего не обрезалось.
+ * Афиша до публикации лежит в KV (D1 — для строк, не для файлов):
+ * ключ `poster:<eventId>:<kind>`.
  */
-async function deliver(
-	env: Env,
-	chatId: number,
-	text: string,
-	poster?: { fileId?: string | null; bytes?: Uint8Array },
-): Promise<SentPost> {
-	const hasPoster = Boolean(poster?.fileId || poster?.bytes);
-	if (!hasPoster) return sendPost(env.BOT_TOKEN, chatId, text);
-
-	const caption = text.length <= CAPTION_LIMIT ? text : undefined;
-	const sent = poster?.bytes
-		? await sendPhotoBytes(env.BOT_TOKEN, chatId, poster.bytes, "poster.jpg", caption)
-		: await sendPhotoByFileId(env.BOT_TOKEN, chatId, poster?.fileId as string, caption);
-
-	if (!caption) {
-		// Афиша ушла картинкой, текст — следующим сообщением; id для отметки
-		// берём от поста с афишей (он «главный»).
-		await sendPost(env.BOT_TOKEN, chatId, text);
-	}
-	return sent;
+export function posterKey(eventId: string, kind: string): string {
+	return `poster:${eventId}:${kind}`;
 }
 
-/**
- * Планирует все три поста и сразу публикует анонс. Афиши приходят из CMS
- * байтами: анонсную отправляем сейчас, дневную — сохраняем в Telegram,
- * чтобы к дневному посту у неё уже был file_id.
- */
-export async function announceEvent(
-	env: Env,
-	event: AnnounceEvent,
-	posters: { announce?: Uint8Array; day?: Uint8Array },
-	now = Date.now(),
-): Promise<{ chatId: number; messageId: number | null; alreadySent: boolean }> {
-	const chatId = await getAnnounceChatId(env.BOOK_CLUB_DB);
-	if (chatId === null) throw new AnnounceChatNotSet();
-
-	const snapshot = JSON.stringify(event);
-	for (const kind of KINDS) {
-		await planAnnouncement(env.BOOK_CLUB_DB, {
-			eventId: event.id,
-			kind,
-			chatId,
-			runAt: runAtFor(kind, event, now),
-			event: snapshot,
-		});
-	}
-
-	// Повторный вызов (правка встречи) обновляет план и афишу дня, но анонс
-	// второй раз не постит.
-	const already = await getAnnouncement(env.BOOK_CLUB_DB, event.id, "announce");
-	const alreadySent = already?.sent_at != null;
-
-	let sent: SentPost = { messageId: already?.message_id ?? null, photoFileId: null };
-	if (!alreadySent) {
-		const ctx = await buildContext(env, event);
-		sent = await deliver(env, chatId, renderAnnouncement("announce", ctx), {
-			bytes: posters.announce,
-		});
-		await markAnnouncementSent(env.BOOK_CLUB_DB, event.id, "announce", sent.messageId, now);
-		if (sent.photoFileId) {
-			await setPosterFileId(env.BOOK_CLUB_DB, event.id, "announce", sent.photoFileId);
-		}
-	}
-
-	// Дневную афишу заранее загружаем в Telegram (отправкой в тот же чат её
-	// пришлось бы показать раньше времени), поэтому просто держим байты до
-	// дневного поста: сохраняем как file_id только то, что уже отправлено.
-	if (posters.day) {
-		await planAnnouncement(env.BOOK_CLUB_DB, {
-			eventId: event.id,
-			kind: "day",
-			chatId,
-			runAt: runAtFor("day", event, now),
-			event: snapshot,
-			posterFileId: null,
-		});
-		await stashDayPoster(env, event.id, posters.day);
-	}
-
-	return { chatId, messageId: sent.messageId, alreadySent };
-}
-
-/**
- * Дневная афиша до публикации живёт в KV (D1 — для строк, не для файлов):
- * ключ `poster:<eventId>`, значение — base64 картинки.
- */
-export function dayPosterKey(eventId: string): string {
-	return `poster:${eventId}`;
-}
-
-async function stashDayPoster(env: Env, eventId: string, bytes: Uint8Array): Promise<void> {
-	await env.BOOK_CLUB_KV.put(dayPosterKey(eventId), bytes as unknown as ArrayBuffer, {
-		// Афиша нужна только до дня встречи; месяц с запасом.
+async function stashPoster(env: Env, eventId: string, kind: string, bytes: Uint8Array): Promise<void> {
+	await env.BOOK_CLUB_KV.put(posterKey(eventId, kind), bytes as unknown as ArrayBuffer, {
+		// Афиша нужна до публикации; месяц с запасом.
 		expirationTtl: 60 * 60 * 24 * 31,
 	});
 }
 
-async function takeDayPoster(env: Env, eventId: string): Promise<Uint8Array | undefined> {
-	const stored = await env.BOOK_CLUB_KV.get(dayPosterKey(eventId), "arrayBuffer");
-	if (!stored) return undefined;
-	return new Uint8Array(stored);
-}
-
-/** Публикует один запланированный пост. */
-async function publish(env: Env, row: AnnouncementRow): Promise<void> {
-	const kind = row.kind as AnnounceKind;
-	const event = JSON.parse(row.event) as AnnounceEvent;
-	const ctx = await buildContext(env, event);
-
-	// Дневной пост берёт свою афишу (если её загрузили), напоминание — уже
-	// отправленную афишу по file_id: повторная загрузка файла не нужна.
-	const bytes = kind === "day" ? await takeDayPoster(env, event.id) : undefined;
-	const sent = await deliver(env, row.chat_id, renderAnnouncement(kind, ctx), {
-		fileId: bytes ? null : row.poster_file_id,
-		bytes,
-	});
-
-	const marked = await markAnnouncementSent(env.BOOK_CLUB_DB, event.id, kind, sent.messageId);
-	if (!marked) {
-		console.warn(`Пост ${kind} о ${event.id} уже был отмечен отправленным`);
-		return;
-	}
-	if (sent.photoFileId) {
-		await setPosterFileId(env.BOOK_CLUB_DB, event.id, kind, sent.photoFileId);
-		// Напоминание переиспользует афишу дня.
-		await setPosterFileId(env.BOOK_CLUB_DB, event.id, "soon", sent.photoFileId);
-	}
-	if (kind === "day" && bytes) {
-		await env.BOOK_CLUB_KV.delete(dayPosterKey(event.id));
-	}
+async function takePoster(env: Env, eventId: string, kind: string): Promise<Uint8Array | undefined> {
+	const stored = await env.BOOK_CLUB_KV.get(posterKey(eventId, kind), "arrayBuffer");
+	return stored ? new Uint8Array(stored) : undefined;
 }
 
 /**
- * Cron: публикует посты, которым пришло время. Ошибка по одному посту не
- * останавливает остальные — при следующем запуске он попробует снова
- * (sent_at ставится только после успешной отправки).
+ * Готовит (или обновляет) черновики трёх постов о встрече. Ничего не публикует:
+ * тексты ждут админа в CMS. Афиши складываем в KV — при публикации бот отправит
+ * их файлом и дальше будет переиспользовать полученный file_id.
  */
-export async function runDueAnnouncements(env: Env, now = Date.now()): Promise<void> {
-	const due = await listDueAnnouncements(env.BOOK_CLUB_DB, now);
-	if (due.length === 0) return;
-	console.log(`Посты о встречах к публикации: ${due.length}`);
+export async function prepareDrafts(
+	env: Env,
+	event: AnnounceEvent,
+	posters: { announce?: Uint8Array; day?: Uint8Array },
+): Promise<{ drafts: number }> {
+	const snapshot = JSON.stringify(event);
+	const ctx = await buildContext(env, event);
 
-	for (const row of due) {
-		// Напоминание «за 5 минут» бессмысленно, если встреча давно началась:
-		// отмечаем отправленным, чтобы не постить в пустоту после простоя cron.
-		if (row.kind === "soon" && now > row.run_at + 30 * 60 * 1000) {
-			await markAnnouncementSent(env.BOOK_CLUB_DB, row.event_id, row.kind, null, now);
-			continue;
-		}
+	// Напоминание переиспользует афишу дня — своей у него нет.
+	if (posters.announce) await stashPoster(env, event.id, "announce", posters.announce);
+	if (posters.day) await stashPoster(env, event.id, "day", posters.day);
+
+	let count = 0;
+	for (const kind of POST_KINDS) {
+		const draft = await upsertPostDraft(env.BOOK_CLUB_DB, {
+			eventId: event.id,
+			kind,
+			event: snapshot,
+			text: renderAnnouncement(kind, ctx),
+			hasPoster: kind === "announce" ? Boolean(posters.announce) : kind === "day" ? Boolean(posters.day) : false,
+		});
+		if (draft) count++;
+	}
+	return { drafts: count };
+}
+
+/** Пересобирает текст черновика из свежих данных (после правок в репозитории). */
+export async function refreshDraft(env: Env, id: number): Promise<PostDraft | null> {
+	const draft = await getPostDraft(env.BOOK_CLUB_DB, id);
+	if (!draft || draft.status === "sent") return draft;
+	const event = JSON.parse(draft.event) as AnnounceEvent;
+	const ctx = await buildContext(env, event);
+	// edited = false: текст снова «как из данных», следующая правка встречи его обновит.
+	return setPostDraftText(
+		env.BOOK_CLUB_DB,
+		id,
+		renderAnnouncement(draft.kind as AnnounceKind, ctx),
+		false,
+	);
+}
+
+/**
+ * Публикует черновик в выбранные группы (по умолчанию — во все).
+ * Афишу первый раз отправляем файлом, дальше по file_id: Telegram не заставляет
+ * загружать одну и ту же картинку в каждый чат.
+ */
+export async function publishDraft(
+	env: Env,
+	id: number,
+	chatIds?: number[],
+): Promise<{ sentTo: { chat_id: number; message_id: number | null }[]; errors: string[] }> {
+	const draft = await getPostDraft(env.BOOK_CLUB_DB, id);
+	if (!draft) throw new Error("Черновик не найден");
+
+	const chats = await listAnnounceChats(env.BOOK_CLUB_DB);
+	if (chats.length === 0) throw new NoAnnounceChats();
+	const targets =
+		chatIds && chatIds.length > 0
+			? chats.filter((c) => chatIds.includes(c.chat_id))
+			: chats;
+	if (targets.length === 0) throw new Error("Ни одна из выбранных групп не подключена к боту");
+
+	// Афиша: file_id (если уже публиковали) либо байты из KV. У напоминания
+	// своей афиши нет — берём афишу дня, она к этому времени уже загружена.
+	let fileId = draft.poster_file_id;
+	let bytes: Uint8Array | undefined;
+	if (!fileId && draft.has_poster) {
+		bytes = await takePoster(env, draft.event_id, draft.kind);
+	}
+	if (!fileId && !bytes && draft.kind === "soon") {
+		const day = await getDraftByKind(env, draft.event_id, "day");
+		fileId = day?.poster_file_id ?? null;
+	}
+
+	const sentTo: { chat_id: number; message_id: number | null }[] = [];
+	const errors: string[] = [];
+	for (const chat of targets) {
 		try {
-			await publish(env, row);
+			const caption = draft.text.length <= CAPTION_LIMIT ? draft.text : undefined;
+			let messageId: number | null = null;
+
+			if (fileId) {
+				const sent = await sendPhotoByFileId(env.BOT_TOKEN, chat.chat_id, fileId, caption);
+				messageId = sent.messageId;
+			} else if (bytes) {
+				const sent = await sendPhotoBytes(env.BOT_TOKEN, chat.chat_id, bytes, "poster.jpg", caption);
+				messageId = sent.messageId;
+				// Дальше переиспользуем file_id вместо повторной загрузки файла.
+				if (sent.photoFileId) {
+					fileId = sent.photoFileId;
+					await setPostDraftPoster(env.BOOK_CLUB_DB, id, sent.photoFileId);
+				}
+			} else {
+				const sent = await sendPost(env.BOT_TOKEN, chat.chat_id, draft.text);
+				messageId = sent.messageId;
+			}
+
+			// Подпись к фото ограничена 1024 символами — длинный текст отдельным
+			// сообщением, чтобы ничего не обрезалось.
+			if ((fileId || bytes) && draft.text.length > CAPTION_LIMIT) {
+				await sendPost(env.BOT_TOKEN, chat.chat_id, draft.text);
+			}
+			sentTo.push({ chat_id: chat.chat_id, message_id: messageId });
 		} catch (err) {
-			console.error(`Не удалось опубликовать ${row.kind} о ${row.event_id}:`, err);
+			const reason = err instanceof Error ? err.message : String(err);
+			console.error(`Пост ${draft.kind} о ${draft.event_id} не ушёл в ${chat.chat_id}:`, err);
+			errors.push(`${chat.title ?? chat.chat_id}: ${reason}`);
 		}
 	}
+
+	// Отправленным считаем, если ушло хотя бы в одну группу: иначе кнопка
+	// «Опубликовать» должна остаться доступной.
+	if (sentTo.length > 0) {
+		await markPostDraftSent(env.BOOK_CLUB_DB, id, sentTo);
+		if (fileId) await env.BOOK_CLUB_KV.delete(posterKey(draft.event_id, draft.kind));
+	}
+	return { sentTo, errors };
+}
+
+/** Черновик встречи по виду поста (нужен напоминанию, чтобы взять афишу дня). */
+async function getDraftByKind(env: Env, eventId: string, kind: string): Promise<PostDraft | null> {
+	const { results } = await env.BOOK_CLUB_DB.prepare(
+		"SELECT * FROM post_drafts WHERE event_id = ? AND kind = ?",
+	)
+		.bind(eventId, kind)
+		.all<PostDraft>();
+	return results?.[0] ?? null;
 }

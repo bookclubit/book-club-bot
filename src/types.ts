@@ -75,14 +75,13 @@ export interface LiveTalkEvent extends EventBase {
 
 export type ClubEvent = ClosedChapterEvent | LiveTalkEvent;
 
-/** Ссылка на тему в chapter.json. */
+/** Тема главы (объект внутри chapter.json) — бот берёт только id и название. */
 export interface TopicRef {
 	id: string;
 	title: string;
-	file: string;
 }
 
-/** Индекс главы (chapter.json) — бот использует только список тем. */
+/** Глава (chapter.json) — бот использует только список тем. */
 export interface Chapter {
 	order: number;
 	title: string;
@@ -91,14 +90,15 @@ export interface Chapter {
 
 /** Единый реестр контента (index.json в корне book-club-data). */
 export interface ContentIndex {
-	version: 1;
+	version: number;
 	active_book: string;
 	books: {
 		folder: string;
 		id: string;
 		title: string;
 		status?: string;
-		chapters: string[];
+		/** Все главы книги: slug, порядок, название и число тем. */
+		chapters: { slug: string; order: number; title: string; topics: number }[];
 	}[];
 	events: string[];
 	speakers?: {

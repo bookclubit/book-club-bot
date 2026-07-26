@@ -3,7 +3,7 @@ declare module "cloudflare:test" {
 }
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
-import worker from "../src/index";
+import worker, { groupCommand } from "../src/index";
 import type { CardProgress, DeckCard, Flashcard } from "../src/types";
 import {
 	calculateNextReview,
@@ -593,6 +593,19 @@ describe("Посты о встрече в группу клуба", () => {
 		expect(await res.text()).toContain("anons_here");
 	});
 })
+
+describe("Бот в группе клуба: только свои команды", () => {
+	it("на болтовню участников и чужие команды не реагирует", () => {
+		expect(groupCommand("/anons_here")).toBe("anons_here");
+		// В группе Telegram дописывает адресата к команде.
+		expect(groupCommand("/anons_here@bookclubfrontbot")).toBe("anons_here");
+		expect(groupCommand("привет всем")).toBeNull();
+		expect(groupCommand("а бот тут /anons_here")).toBeNull();
+		expect(groupCommand("/today")).toBeNull();
+		expect(groupCommand("/speaker")).toBeNull();
+		expect(groupCommand(undefined)).toBeNull();
+	});
+});
 
 describe("Участие в клубе: темы берут только участники", () => {
 	// Ник не передаём: каталог спикеров лежит в git, а тесты не ходят в сеть —

@@ -121,8 +121,28 @@ function parseCommand(text: string): string | null {
 	return first.slice(1).split("@")[0].toLowerCase();
 }
 
+/**
+ * Команды, на которые бот отвечает в группе или канале. Всё остальное там
+ * игнорируется молча: бот-администратор получает ВСЕ сообщения чата (Telegram
+ * отключает для админов режим приватности), и реакция на них была бы спамом
+ * в чате клуба. Личные диалоги, карточки и заявки живут только в личке.
+ */
+const GROUP_COMMANDS = new Set(["anons_here"]);
+
+/** Команда для группы, если сообщение — именно она. Иначе null (молчим). */
+export function groupCommand(text?: string): string | null {
+	const command = text?.trim().startsWith("/") ? parseCommand(text.trim()) : null;
+	return command && GROUP_COMMANDS.has(command) ? command : null;
+}
+
 async function routeMessage(env: Env, message: TelegramMessage): Promise<void> {
 	const text = message.text?.trim();
+
+	// Группа или канал: только свои команды, на болтовню участников не реагируем.
+	if (message.chat.type !== "private") {
+		if (groupCommand(text) === "anons_here") await handleAnnounceHere(env, message);
+		return;
+	}
 
 	// Сообщение без текста: фото может быть шагом диалога заявки.
 	if (!text) {

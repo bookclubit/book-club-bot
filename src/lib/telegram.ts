@@ -159,3 +159,106 @@ export function answerCallback(
 		...(text ? { text } : {}),
 	});
 }
+
+/** Ответ Telegram на отправку сообщения: нужен message_id и file_id фото. */
+interface SentMessage {
+	result?: {
+		message_id?: number;
+		photo?: { file_id: string; file_size?: number }[];
+	};
+}
+
+export interface SentPost {
+	messageId: number | null;
+	/** file_id самой большой версии фото — переиспользуем в следующих постах. */
+	photoFileId: string | null;
+}
+
+function readSent(response: unknown): SentPost {
+	const data = response as SentMessage;
+	const photos = data.result?.photo ?? [];
+	// Telegram отдаёт набор размеров; последний — самый большой.
+	const largest = photos.length > 0 ? photos[photos.length - 1] : undefined;
+	return {
+		messageId: data.result?.message_id ?? null,
+		photoFileId: largest?.file_id ?? null,
+	};
+}
+
+/** Отправляет текстовый пост (в группу/канал). Ссылки — без превью. */
+export async function sendPost(token: string, chatId: number, text: string): Promise<SentPost> {
+	return readSent(
+		await callApi(token, "sendMessage", {
+			chat_id: chatId,
+			text,
+			parse_mode: "HTML",
+			disable_web_page_preview: true,
+		}),
+	);
+}
+
+/** Отправляет уже загруженное в Telegram фото по file_id с подписью. */
+export async function sendPhotoByFileId(
+	token: string,
+	chatId: number,
+	fileId: string,
+	caption?: string,
+): Promise<SentPost> {
+	return readSent(
+		await callApi(token, "sendPhoto", {
+			chat_id: chatId,
+			photo: fileId,
+			...(caption ? { caption, parse_mode: "HTML" } : {}),
+		}),
+	);
+}
+
+/**
+ * Загружает фото байтами (афиша из CMS) — multipart, поэтому в обход callApi.
+ * Возвращает file_id: следующие посты той же афишей уже не грузят файл заново.
+ */
+export async function sendPhotoBytes(
+	token: string,
+	chatId: number,
+	bytes: Uint8Array,
+	filename: string,
+	caption?: string,
+): Promise<SentPost> {
+	const form = new FormData();
+	form.set("chat_id", String(chatId));
+	if (caption) {
+		form.set("caption", caption);
+		form.set("parse_mode", "HTML");
+	}
+	form.set("photo", new Blob([bytes]), filename);
+
+	const res = await fetch(`${API_BASE}${token}/sendPhoto`, { method: "POST", body: form });
+	if (!res.ok) {
+		const text = await res.text();
+		throw new Error(`Telegram sendPhoto: HTTP ${res.status} ${text}`);
+	}
+	return readSent(await res.json());
+}
+
+/**
+ * Проверяет, что пользователь — админ или владелец чата. Нужно для команды,
+ * которая назначает чат для анонсов: иначе любой участник группы сможет
+ * перенастроить бота.
+ */
+export async function isChatAdmin(
+	token: string,
+	chatId: number,
+	userId: number,
+): Promise<boolean> {
+	try {
+		const data = (await callApi(token, "getChatMember", {
+			chat_id: chatId,
+			user_id: userId,
+		})) as { result?: { status?: string } };
+		const status = data.result?.status ?? "";
+		return status === "creator" || status === "administrator";
+	} catch (err) {
+		console.error(`Не удалось проверить права в чате ${chatId}:`, err);
+		return false;
+	}
+}

@@ -31,16 +31,26 @@ import {
 	releaseClaimByTopic,
 	saveCardProgress,
 	setClaimSlides,
+	setBotSetting,
 	setDailyCards,
 	updateSpeakerClaim,
 	upsertUser,
 	wasReminderSent,
+	ANNOUNCE_CHAT_KEY,
 } from "./lib/db";
+import { AnnounceChatNotSet, announceEvent, runDueAnnouncements } from "./lib/announcer";
+import type { AnnounceEvent } from "./lib/announce";
 import { initialProgress, reviewFromQuality } from "./lib/spaced-repetition";
 import { startStudy } from "./lib/study";
 import { eventDateFromPath, eventStartMs, mskToday, renderEventLinks } from "./lib/events";
 import { deleteSubscriber, listSubscribers } from "./lib/storage";
-import { getFileResponse, sendMessage, setChatMenuButton, setMyCommands } from "./lib/telegram";
+import {
+	getFileResponse,
+	isChatAdmin,
+	sendMessage,
+	setChatMenuButton,
+	setMyCommands,
+} from "./lib/telegram";
 import { handleCallback } from "./handlers/callback";
 import {
 	DEFAULT_CMS_CLAIMS_URL,
@@ -61,6 +71,39 @@ const MORNING_INTRO =
 
 const UNKNOWN_COMMAND =
 	"Не знаю такой команды 🤔\n\nСписок всех команд — /help";
+
+/**
+ * `/anons_here` — назначить этот чат для анонсов встреч. Работает только в
+ * группе или канале и только от администратора чата: иначе любой участник
+ * смог бы перенаправить анонсы клуба к себе.
+ */
+async function handleAnnounceHere(env: Env, message: TelegramMessage): Promise<void> {
+	const chatId = message.chat.id;
+	const isPrivate = message.chat.type === "private";
+	if (isPrivate) {
+		await sendMessage(
+			env.BOT_TOKEN,
+			chatId,
+			"Эту команду нужно отправить в группе или канале клуба — там, где бот будет постить анонсы встреч.",
+		);
+		return;
+	}
+
+	const userId = message.from?.id;
+	if (!userId || !(await isChatAdmin(env.BOT_TOKEN, chatId, userId))) {
+		await sendMessage(env.BOT_TOKEN, chatId, "Назначить чат для анонсов может только администратор.");
+		return;
+	}
+
+	await setBotSetting(env.BOOK_CLUB_DB, ANNOUNCE_CHAT_KEY, String(chatId));
+	await sendMessage(
+		env.BOT_TOKEN,
+		chatId,
+		"✅ Готово: анонсы встреч будут выходить здесь.\n\n" +
+			"Дальше — создайте встречу в CMS: анонс выйдет сразу, афиша дня — в 10:00 МСК в день встречи, " +
+			"напоминание — за 5 минут до начала.",
+	);
+}
 
 /** Извлекает имя команды из текста: «/today@bot arg» → «today». */
 function parseCommand(text: string): string | null {
@@ -114,6 +157,8 @@ async function routeMessage(env: Env, message: TelegramMessage): Promise<void> {
 			return handleSettings(env, message);
 		case "help":
 			return handleHelp(env, message);
+		case "anons_here":
+			return handleAnnounceHere(env, message);
 		default:
 			await sendMessage(env.BOT_TOKEN, message.chat.id, UNKNOWN_COMMAND);
 	}
@@ -364,6 +409,7 @@ const BOT_COMMANDS = [
 	{ command: "speaker", description: "Выступить с докладом — выбрать тему" },
 	{ command: "cancel", description: "Прервать заявку на доклад" },
 	{ command: "help", description: "Помощь и список команд" },
+	{ command: "anons_here", description: "Постить анонсы встреч в этот чат (админ)" },
 	{ command: "start", description: "Подписка на ежедневные карточки" },
 	{ command: "stop", description: "Отписаться от карточек" },
 ];
@@ -380,6 +426,56 @@ async function handleAdminSetup(env: Env): Promise<Response> {
 	await setMyCommands(env.BOT_TOKEN, BOT_COMMANDS);
 	await setChatMenuButton(env.BOT_TOKEN, "🗂 Приложение", miniappUrl);
 	return json({ ok: true, commands: BOT_COMMANDS.map((c) => c.command), menu_button: miniappUrl });
+}
+
+/** Афиша из CMS приходит base64 — декодируем в байты для sendPhoto. */
+function decodePoster(base64?: string | null): Uint8Array | undefined {
+	if (!base64) return undefined;
+	// CMS может прислать data-URL: отрезаем префикс.
+	const clean = base64.includes(",") ? base64.slice(base64.indexOf(",") + 1) : base64;
+	try {
+		const binary = atob(clean);
+		const bytes = new Uint8Array(binary.length);
+		for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+		return bytes.length > 0 ? bytes : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Анонс встречи в группу клуба: POST /api/admin/announce.
+ * Тело — { event, posters: { announce?, day? } }, где event повторяет схему
+ * events/*.json (CMS присылает поля формы: встречи ещё нет в book-club-data,
+ * она в открытом PR). Бот сразу постит анонс и планирует афишу дня и
+ * напоминание за 5 минут.
+ */
+async function handleAdminAnnounce(env: Env, request: Request): Promise<Response> {
+	let body: { event?: AnnounceEvent; posters?: { announce?: string; day?: string } };
+	try {
+		body = (await request.json()) as typeof body;
+	} catch {
+		return json({ error: "ожидается JSON" }, 400);
+	}
+
+	const event = body.event;
+	if (!event?.id || !event.date || !event.time || !event.title) {
+		return json({ error: "в event нужны id, title, date и time" }, 400);
+	}
+
+	try {
+		const sent = await announceEvent(env, event, {
+			announce: decodePoster(body.posters?.announce),
+			day: decodePoster(body.posters?.day),
+		});
+		return json({ ok: true, ...sent });
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		console.error(`Не удалось анонсировать ${event.id}:`, err);
+		// Чат не настроен — это ошибка настройки, а не сбой: 409, чтобы CMS
+		// показала осмысленную подсказку вместо «что-то пошло не так».
+		return json({ error: message }, message.includes("Чат для анонсов") ? 409 : 502);
+	}
 }
 
 // ── Платформа: вход через Telegram и единый прогресс карточек ─────────────────
@@ -556,6 +652,9 @@ async function routeApi(env: Env, request: Request, url: URL): Promise<Response>
 		if (url.pathname === "/api/admin/setup" && request.method === "POST") {
 			return handleAdminSetup(env);
 		}
+		if (url.pathname === "/api/admin/announce" && request.method === "POST") {
+			return handleAdminAnnounce(env, request);
+		}
 	}
 	return json({ error: "не найдено" }, 404);
 }
@@ -719,10 +818,15 @@ export default {
 			);
 			return;
 		}
-		// Каждые 15 минут: «встреча началась».
+		// Каждые 5 минут: «встреча началась», афиша дня и напоминание за 5 минут.
 		ctx.waitUntil(
 			runTimedReminders(env).catch((err) =>
 				console.error("Ошибка напоминаний о встречах:", err),
+			),
+		);
+		ctx.waitUntil(
+			runDueAnnouncements(env).catch((err) =>
+				console.error("Ошибка постов о встречах:", err),
 			),
 		);
 	},

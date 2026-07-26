@@ -1,6 +1,6 @@
 // Загрузка данных из репозитория book-club-data (GitHub raw).
 
-import type { Chapter, ClubEvent, ContentIndex, DeckCard, Flashcard } from "../types";
+import type { BookMeta, Chapter, ClubEvent, ContentIndex, DeckCard, Flashcard } from "../types";
 
 /** Корень raw-контента по умолчанию (перекрывается переменной env RAW_ROOT). */
 const DEFAULT_RAW_ROOT = "https://raw.githubusercontent.com/bookclubit/book-club-data/main";
@@ -92,6 +92,16 @@ export async function fetchChapter(folder: string, chapterSlug: string): Promise
 	try {
 		const res = await fetchWithRetry(`${dataBase()}/${folder}/chapters/${chapterSlug}/chapter.json`);
 		return (await res.json()) as Chapter;
+	} catch {
+		return null;
+	}
+}
+
+/** Мета книги (название, авторы, ссылка) — для постов о встрече. */
+export async function fetchBookMeta(folder: string): Promise<BookMeta | null> {
+	try {
+		const res = await fetchWithRetry(`${dataBase()}/${folder}/meta.json`);
+		return (await res.json()) as BookMeta;
 	} catch {
 		return null;
 	}

@@ -75,10 +75,24 @@ export interface LiveTalkEvent extends EventBase {
 
 export type ClubEvent = ClosedChapterEvent | LiveTalkEvent;
 
+/**
+ * Пост о встрече в группу клуба: анонс сразу после создания встречи, афиша
+ * в день встречи (10:00 МСК) и напоминание за 5 минут до начала.
+ */
+export type AnnounceKind = "announce" | "day" | "soon";
+
 /** Тема главы (объект внутри chapter.json) — бот берёт только id и название. */
 export interface TopicRef {
 	id: string;
 	title: string;
+}
+
+/** Мета книги (meta.json) — для постов о встрече нужны название, авторы, ссылка. */
+export interface BookMeta {
+	id: string;
+	title: string;
+	authors?: { name: string }[];
+	url?: string;
 }
 
 /** Глава (chapter.json) — бот использует только список тем. */

@@ -12,6 +12,13 @@ import {
 	selectDue,
 } from "../src/lib/spaced-repetition";
 import { eventDateFromPath, eventPathById } from "../src/lib/events";
+import {
+	buildTopics,
+	renderAnnounce,
+	renderDay,
+	renderSoon,
+	runAtFor,
+} from "../src/lib/announce";
 import { findSpeakerByUsername, telegramHandle } from "../src/lib/speakers";
 import {
 	assignClaim,
@@ -449,3 +456,134 @@ describe("Единый источник занятости: заявки из CM
 		expect(profile?.photoFileId).toBe("photo-xyz");
 	});
 });
+
+describe("Посты о встрече в группу клуба", () => {
+	const talkEvent = {
+		id: "live-2026-07-24-osnovy",
+		type: "live-talk" as const,
+		title: "Начинаем новую книгу!",
+		date: "2026-07-24",
+		time: "18:00",
+		stream: 114,
+		book_id: "ai-engineering",
+		chapter: "01-osnovy",
+		assignment: "прочитать главу 1",
+		streams: { youtube: "https://youtu.be/x", vk: "https://vkvideo.ru/y" },
+	};
+
+	const ctx = {
+		event: talkEvent,
+		book: {
+			title: "AI-инженерия",
+			url: "https://oreilly.com/ai-engineering",
+			authors: ["Чип Хьюен"],
+		},
+		chapterOrder: 1,
+		chapterTitle: "Основы создания AI-приложений",
+		topics: [
+			{ order: 1, title: "Восход AI-инженерии", speaker: "@kunjutone" },
+			{ order: 1, title: "Стек AI-инженерии", speaker: "@Frich22", slidesUrl: "https://slides" },
+			{ order: 1, title: "Планирование AI-приложений" },
+		],
+	};
+
+	it("анонс: номер стрима, книга с автором, дата по-русски, темы со спикерами", () => {
+		const text = renderAnnounce(ctx);
+		expect(text).toContain("Книжный клуб №114: Начинаем новую книгу!");
+		expect(text).toContain("Пятница, 24 июля, в 18:00 МСК");
+		expect(text).toContain("AI-инженерия");
+		expect(text).toContain("Чип Хьюен");
+		expect(text).toContain("Задание:</b> прочитать главу 1");
+		expect(text).toContain("🔴 Глава 1 — Восход AI-инженерии — @kunjutone");
+		// Тема без заявки не выпадает из программы, а помечается свободной.
+		expect(text).toContain("🔴 Глава 1 — Планирование AI-приложений — свободно");
+		expect(text).toContain('<a href="https://youtu.be/x">YouTube</a>');
+	});
+
+	it("пост в день встречи: программа и презентации сдавших спикеров", () => {
+		const text = renderDay(ctx);
+		expect(text).toContain("На этом стриме читаем");
+		expect(text).toContain("Рассмотрим темы:");
+		expect(text).toContain("Сегодня в 18:00 МСК");
+		expect(text).toContain("Презентация — Стек AI-инженерии");
+	});
+
+	it("напоминание за 5 минут: коротко и со ссылками", () => {
+		const text = renderSoon(ctx);
+		expect(text).toContain("Через 5 минут начинаем");
+		expect(text).toContain("VK");
+		// Программа в напоминании не повторяется.
+		expect(text).not.toContain("Восход AI-инженерии");
+	});
+
+	it("страницы обсуждения попадают в задание", () => {
+		const text = renderAnnounce({
+			...ctx,
+			event: {
+				...talkEvent,
+				type: "closed-chapter",
+				assignment: "",
+				pages: { from: 12, to: 48 },
+				call_url: "https://meet.google.com/abc",
+			},
+			topics: [],
+		});
+		expect(text).toContain("страницы 12–48");
+		expect(text).toContain("Google Meet");
+		expect(text).toContain("Разбираем главу 1 — Основы создания AI-приложений");
+	});
+
+	it("HTML в названиях экранируется (parse_mode=HTML)", () => {
+		const text = renderAnnounce({
+			...ctx,
+			event: { ...talkEvent, title: "<b>взлом</b>" },
+			topics: [],
+		});
+		expect(text).toContain("&lt;b&gt;взлом&lt;/b&gt;");
+	});
+
+	it("расписание: анонс сразу, афиша в 10:00 МСК, напоминание за 5 минут", () => {
+		const now = Date.parse("2026-07-20T09:00:00+03:00");
+		expect(runAtFor("announce", talkEvent, now)).toBe(now);
+		expect(runAtFor("day", talkEvent, now)).toBe(Date.parse("2026-07-24T10:00:00+03:00"));
+		expect(runAtFor("soon", talkEvent, now)).toBe(Date.parse("2026-07-24T17:55:00+03:00"));
+	});
+
+	it("если 10:00 уже прошло, дневной пост не уходит в прошлое", () => {
+		const now = Date.parse("2026-07-24T15:00:00+03:00");
+		expect(runAtFor("day", talkEvent, now)).toBe(now);
+	});
+
+	it("спикер берётся только из подтверждённой заявки", () => {
+		const topics = buildTopics(
+			[
+				{ id: "t1", title: "Тема 1" },
+				{ id: "t2", title: "Тема 2" },
+			],
+			[
+				{ topicId: "t1", username: "kunjutone", fullName: "Антон", status: "confirmed", slidesUrl: null },
+				{ topicId: "t2", username: "someone", fullName: "Ещё кто-то", status: "pending", slidesUrl: null },
+			],
+			3,
+		);
+		expect(topics[0]).toMatchObject({ order: 3, speaker: "@kunjutone" });
+		expect(topics[1].speaker).toBeUndefined();
+	});
+
+	it("анонс без настроенного чата отвечает 409 с подсказкой", async () => {
+		// Хранилище D1 изолируется между тестами, а флаг «схема создана» живёт
+		// в модуле — сбрасываем, иначе таблиц в свежей базе не будет.
+		resetSchemaCacheForTests();
+		const TOKEN = "test-admin-token";
+		const request = new IncomingRequest("http://example.com/api/admin/announce", {
+			method: "POST",
+			headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+			body: JSON.stringify({ event: talkEvent }),
+		});
+		const ctxExec = createExecutionContext();
+		const res = await worker.fetch(request, { ...env, ADMIN_API_TOKEN: TOKEN }, ctxExec);
+		await waitOnExecutionContext(ctxExec);
+		expect(res.status).toBe(409);
+		expect(await res.text()).toContain("anons_here");
+	});
+})

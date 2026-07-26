@@ -429,7 +429,11 @@ export async function handleDialogMessage(env: Env, message: TelegramMessage): P
 	// Заявка на участие: фото (или /skip) — и отправляем админу.
 	if (dialog.step === "apply_photo") {
 		const photo = message.photo?.at(-1);
-		if (!photo && text !== "/skip") return false;
+		if (!photo && text !== "/skip") {
+			// Не отдаём сообщение роутеру: он ответил бы «не знаю такой команды».
+			await sendMessage(env.BOT_TOKEN, chatId, "Жду фото 📸 Или /skip — добавим аватарку позже.");
+			return true;
+		}
 		const request = await saveMembershipRequest(env.BOOK_CLUB_DB, {
 			chatId,
 			username: message.from?.username,

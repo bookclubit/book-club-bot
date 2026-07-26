@@ -26,12 +26,18 @@ import {
 	createSpeakerClaim,
 	deleteSpeakerClaim,
 	getSpeakerProfile,
+	listMembershipRequests,
 	listSpeakerClaims,
 	releaseClaimByTopic,
 	resetSchemaCacheForTests,
+	saveMembershipRequest,
 	saveSpeakerIdentity,
 	setClaimSlides,
+	setMembershipStatus,
+	type MembershipRequest,
 } from "../src/lib/db";
+import { speakerAccess } from "../src/lib/members";
+import { membershipPrompt } from "../src/handlers/registration";
 import {
 	mintSession,
 	verifyInitData,
@@ -585,5 +591,85 @@ describe("Посты о встрече в группу клуба", () => {
 		await waitOnExecutionContext(ctxExec);
 		expect(res.status).toBe(409);
 		expect(await res.text()).toContain("anons_here");
+	});
+})
+
+describe("Участие в клубе: темы берут только участники", () => {
+	// Ник не передаём: каталог спикеров лежит в git, а тесты не ходят в сеть —
+	// проверяем именно оперативную часть доступа (D1).
+	it("новый человек тем не видит, одобренная заявка их открывает", async () => {
+		resetSchemaCacheForTests();
+		const db = env.BOOK_CLUB_DB;
+		const chatId = 909001;
+
+		let access = await speakerAccess(env, chatId);
+		expect(access.registered).toBe(false);
+		expect(access.request).toBeNull();
+
+		const created = await saveMembershipRequest(db, {
+			chatId,
+			fullName: "Новый Участник",
+			about: "Фронтендер, хочу рассказать про Vite",
+			source: "miniapp",
+		});
+		expect(created?.status).toBe("pending");
+
+		access = await speakerAccess(env, chatId);
+		expect(access.registered).toBe(false);
+		expect(access.request?.status).toBe("pending");
+		expect(access.fullName).toBe("Новый Участник");
+
+		// Повторная отправка обновляет ту же заявку и не затирает уже известное.
+		await saveMembershipRequest(db, { chatId, about: "Дополнил рассказ", source: "bot" });
+		const mine = (await listMembershipRequests(db)).filter((m) => m.chat_id === chatId);
+		expect(mine).toHaveLength(1);
+		expect(mine[0].full_name).toBe("Новый Участник");
+		expect(mine[0].about).toBe("Дополнил рассказ");
+
+		expect((await setMembershipStatus(db, created!.id, "approved"))?.status).toBe("approved");
+		expect((await speakerAccess(env, chatId)).registered).toBe(true);
+
+		// Принятого участника случайный повтор заявки не лишает доступа.
+		await saveMembershipRequest(db, { chatId, about: "ещё раз", source: "bot" });
+		expect((await speakerAccess(env, chatId)).registered).toBe(true);
+	});
+
+	it("спикера, узнанного ранее, заявкой не мучаем", async () => {
+		resetSchemaCacheForTests();
+		const chatId = 909002;
+		await saveSpeakerIdentity(env.BOOK_CLUB_DB, {
+			chatId,
+			fullName: "Пётр Каталогов",
+			speakerId: "katalogov-petr",
+		});
+		const access = await speakerAccess(env, chatId);
+		expect(access.registered).toBe(true);
+		expect(access.speaker?.id).toBe("katalogov-petr");
+		expect(access.request).toBeNull();
+	});
+
+	it("текст объясняет, что делать: заявка, ожидание, отказ", () => {
+		expect(membershipPrompt(null)).toContain("заявку на участие");
+		expect(membershipPrompt({ status: "pending" } as MembershipRequest)).toContain("у админа");
+		expect(membershipPrompt({ status: "declined" } as MembershipRequest)).toContain("заново");
+	});
+
+	it("бронь темы требует входа, модерация — админ-токена", async () => {
+		const post = (path: string) =>
+			new IncomingRequest(`http://example.com${path}`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: "{}",
+			});
+
+		const ctxExec = createExecutionContext();
+		const claim = await worker.fetch(post("/api/claim"), env, ctxExec);
+		const apply = await worker.fetch(post("/api/membership"), env, ctxExec);
+		const members = await worker.fetch(post("/api/admin/members"), env, ctxExec);
+		await waitOnExecutionContext(ctxExec);
+
+		expect(claim.status).toBe(401);
+		expect(apply.status).toBe(401);
+		expect(members.status).toBe(401);
 	});
 })

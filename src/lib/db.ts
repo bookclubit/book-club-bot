@@ -35,11 +35,38 @@ export interface SpeakerClaim {
 	created_at: number;
 }
 
-/** Шаг диалога заявки: своя тема, вопрос про опыт, выбор себя, ФИО или фото. */
+/**
+ * Заявка на участие в клубе. Без одобренной заявки (или профиля в каталоге)
+ * темы докладов выбрать нельзя — новый человек сначала знакомится с клубом.
+ */
+export interface MembershipRequest {
+	id: number;
+	/** Telegram id = chat_id в личке = id аккаунта платформы. */
+	chat_id: number;
+	username: string | null;
+	full_name: string | null;
+	/** Сообщение от заявителя: о себе и о чём хочет рассказать. */
+	about: string | null;
+	/** Фото, присланное боту. */
+	photo_file_id: string | null;
+	/** Аватар Telegram (приходит со входом в miniapp). */
+	photo_url: string | null;
+	source: "bot" | "miniapp";
+	status: "pending" | "approved" | "declined";
+	created_at: number;
+	decided_at: number | null;
+}
+
+/**
+ * Шаг диалога: своя тема доклада либо заявка на участие (имя → о себе → фото).
+ * Черновик заявки живёт в `data` (JSON) — незаконченная заявка не попадает
+ * к админу.
+ */
 export interface SpeakerDialog {
 	chat_id: number;
-	step: "custom_topic" | "experience" | "name" | "photo";
+	step: "custom_topic" | "apply_name" | "apply_about" | "apply_photo";
 	claim_id: number | null;
+	data: string | null;
 	updated_at: number;
 }
 
@@ -78,7 +105,23 @@ const SCHEMA = [
 		chat_id INTEGER PRIMARY KEY,
 		step TEXT NOT NULL,
 		claim_id INTEGER,
+		data TEXT,
 		updated_at INTEGER NOT NULL
+	)`,
+	// Заявки на участие в клубе (из бота и из miniapp). Одна активная заявка
+	// на человека: повторная отправка обновляет её, а не копит дубли у админа.
+	`CREATE TABLE IF NOT EXISTS membership_requests (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		chat_id INTEGER NOT NULL UNIQUE,
+		username TEXT,
+		full_name TEXT,
+		about TEXT,
+		photo_file_id TEXT,
+		photo_url TEXT,
+		source TEXT NOT NULL DEFAULT 'bot',
+		status TEXT NOT NULL DEFAULT 'pending',
+		created_at INTEGER NOT NULL,
+		decided_at INTEGER
 	)`,
 	// Устойчивая личность спикера: chat_id → имя/фото/каталожный id. Пишется при
 	// узнавании и знакомстве, НЕ удаляется при отклонении темы (в отличие от
@@ -177,6 +220,11 @@ const MIGRATIONS: { table: string; column: string; sql: string }[] = [
 		table: "speaker_claims",
 		column: "slides_url",
 		sql: "ALTER TABLE speaker_claims ADD COLUMN slides_url TEXT",
+	},
+	{
+		table: "speaker_dialog",
+		column: "data",
+		sql: "ALTER TABLE speaker_dialog ADD COLUMN data TEXT",
 	},
 ];
 
@@ -412,6 +460,101 @@ export async function deleteSpeakerClaim(db: D1Database, id: number): Promise<vo
 	await db.prepare("DELETE FROM speaker_claims WHERE id = ?").bind(id).run();
 }
 
+// ── Заявки на участие в клубе ────────────────────────────────────────────────
+
+/**
+ * Создаёт заявку на участие или обновляет свою же (одна на человека).
+ * Уже принятого участника повторная отправка не сбрасывает в «на модерации»:
+ * иначе случайный повтор лишил бы его доступа к темам.
+ */
+export async function saveMembershipRequest(
+	db: D1Database,
+	req: {
+		chatId: number;
+		username?: string | null;
+		fullName?: string | null;
+		about?: string | null;
+		photoFileId?: string | null;
+		photoUrl?: string | null;
+		source: MembershipRequest["source"];
+	},
+): Promise<MembershipRequest | null> {
+	await ensureSchema(db);
+	return db
+		.prepare(
+			`INSERT INTO membership_requests
+				(chat_id, username, full_name, about, photo_file_id, photo_url, source, status, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+			 ON CONFLICT(chat_id) DO UPDATE SET
+				username = COALESCE(excluded.username, membership_requests.username),
+				full_name = COALESCE(excluded.full_name, membership_requests.full_name),
+				about = COALESCE(excluded.about, membership_requests.about),
+				photo_file_id = COALESCE(excluded.photo_file_id, membership_requests.photo_file_id),
+				photo_url = COALESCE(excluded.photo_url, membership_requests.photo_url),
+				source = excluded.source,
+				status = CASE WHEN membership_requests.status = 'approved' THEN 'approved' ELSE 'pending' END,
+				created_at = excluded.created_at,
+				decided_at = CASE WHEN membership_requests.status = 'approved'
+					THEN membership_requests.decided_at ELSE NULL END
+			 RETURNING *`,
+		)
+		.bind(
+			req.chatId,
+			req.username ?? null,
+			req.fullName ?? null,
+			req.about ?? null,
+			req.photoFileId ?? null,
+			req.photoUrl ?? null,
+			req.source,
+			Date.now(),
+		)
+		.first<MembershipRequest>();
+}
+
+export async function getMembershipRequest(
+	db: D1Database,
+	chatId: number,
+): Promise<MembershipRequest | null> {
+	await ensureSchema(db);
+	return db
+		.prepare("SELECT * FROM membership_requests WHERE chat_id = ?")
+		.bind(chatId)
+		.first<MembershipRequest>();
+}
+
+export async function getMembershipRequestById(
+	db: D1Database,
+	id: number,
+): Promise<MembershipRequest | null> {
+	await ensureSchema(db);
+	return db.prepare("SELECT * FROM membership_requests WHERE id = ?").bind(id).first<MembershipRequest>();
+}
+
+/** Все заявки на участие: сначала ждущие решения, внутри — свежие сверху. */
+export async function listMembershipRequests(db: D1Database): Promise<MembershipRequest[]> {
+	await ensureSchema(db);
+	const { results } = await db
+		.prepare(
+			`SELECT * FROM membership_requests
+			 ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END, created_at DESC`,
+		)
+		.all<MembershipRequest>();
+	return results ?? [];
+}
+
+/** Решение админа по заявке на участие. null — заявки уже нет. */
+export async function setMembershipStatus(
+	db: D1Database,
+	id: number,
+	status: MembershipRequest["status"],
+): Promise<MembershipRequest | null> {
+	await ensureSchema(db);
+	return db
+		.prepare("UPDATE membership_requests SET status = ?, decided_at = ? WHERE id = ? RETURNING *")
+		.bind(status, Date.now(), id)
+		.first<MembershipRequest>();
+}
+
 // ── Диалог заявки ────────────────────────────────────────────────────────────
 
 export async function setDialog(
@@ -419,16 +562,28 @@ export async function setDialog(
 	chatId: number,
 	step: SpeakerDialog["step"],
 	claimId: number | null,
+	data?: Record<string, string> | null,
 ): Promise<void> {
 	await ensureSchema(db);
 	await db
 		.prepare(
-			`INSERT INTO speaker_dialog (chat_id, step, claim_id, updated_at) VALUES (?, ?, ?, ?)
+			`INSERT INTO speaker_dialog (chat_id, step, claim_id, data, updated_at) VALUES (?, ?, ?, ?, ?)
 			 ON CONFLICT(chat_id) DO UPDATE SET step = excluded.step,
-				claim_id = excluded.claim_id, updated_at = excluded.updated_at`,
+				claim_id = excluded.claim_id, data = excluded.data, updated_at = excluded.updated_at`,
 		)
-		.bind(chatId, step, claimId, Date.now())
+		.bind(chatId, step, claimId, data ? JSON.stringify(data) : null, Date.now())
 		.run();
+}
+
+/** Черновик заявки из диалога (шаги имя → о себе → фото). */
+export function dialogDraft(dialog: SpeakerDialog | null): Record<string, string> {
+	if (!dialog?.data) return {};
+	try {
+		const parsed = JSON.parse(dialog.data) as unknown;
+		return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {};
+	} catch {
+		return {};
+	}
 }
 
 export async function getDialog(db: D1Database, chatId: number): Promise<SpeakerDialog | null> {

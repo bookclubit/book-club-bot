@@ -17,27 +17,34 @@ import {
 import {
 	assignClaim,
 	cardKey,
+	createSpeakerClaim,
 	DAILY_CARD_OPTIONS,
 	deleteSpeakerClaim,
 	getCardProgress,
 	getCardProgressMap,
 	getClaimByTopic,
 	getDailyCards,
+	getMembershipRequestById,
 	getSpeakerClaim,
 	getUser,
+	listMembershipRequests,
 	listRegistrations,
 	listSpeakerClaims,
 	markReminderSent,
 	releaseClaimByTopic,
 	saveCardProgress,
+	saveMembershipRequest,
 	setClaimSlides,
 	setBotSetting,
 	setDailyCards,
+	setMembershipStatus,
 	updateSpeakerClaim,
 	upsertUser,
 	wasReminderSent,
 	ANNOUNCE_CHAT_KEY,
 } from "./lib/db";
+import { speakerAccess } from "./lib/members";
+import { fetchPlanTopics } from "./lib/plan";
 import { AnnounceChatNotSet, announceEvent, runDueAnnouncements } from "./lib/announcer";
 import type { AnnounceEvent } from "./lib/announce";
 import { initialProgress, reviewFromQuality } from "./lib/spaced-repetition";
@@ -53,11 +60,13 @@ import {
 } from "./lib/telegram";
 import { handleCallback } from "./handlers/callback";
 import {
+	completeClaim,
 	DEFAULT_CMS_CLAIMS_URL,
 	handleCancel,
 	handleDialogMessage,
 	handleJoin,
 	handleSpeaker,
+	notifyAdminMembership,
 } from "./handlers/registration";
 import { handleStart } from "./commands/start";
 import { handleStop } from "./commands/stop";
@@ -388,13 +397,23 @@ async function handleAdminDecision(env: Env, request: Request): Promise<Response
 	return json({ error: "action: confirm | decline | assign | release | slides" }, 400);
 }
 
-/** Фото спикера из Telegram для CMS: GET /api/admin/photo?claim=<id>. */
+/**
+ * Фото из Telegram для CMS: GET /api/admin/photo?claim=<id> (заявка на доклад)
+ * или ?member=<id> (заявка на участие в клубе).
+ */
 async function handleAdminPhoto(env: Env, url: URL): Promise<Response> {
-	const id = Number(url.searchParams.get("claim"));
-	const claim = Number.isFinite(id) ? await getSpeakerClaim(env.BOOK_CLUB_DB, id) : null;
-	if (!claim?.photo_file_id) return json({ error: "у заявки нет фото" }, 404);
+	const claimId = Number(url.searchParams.get("claim"));
+	const memberId = Number(url.searchParams.get("member"));
 
-	const file = await getFileResponse(env.BOT_TOKEN, claim.photo_file_id);
+	let fileId: string | null = null;
+	if (Number.isFinite(memberId) && memberId > 0) {
+		fileId = (await getMembershipRequestById(env.BOOK_CLUB_DB, memberId))?.photo_file_id ?? null;
+	} else if (Number.isFinite(claimId) && claimId > 0) {
+		fileId = (await getSpeakerClaim(env.BOOK_CLUB_DB, claimId))?.photo_file_id ?? null;
+	}
+	if (!fileId) return json({ error: "у заявки нет фото" }, 404);
+
+	const file = await getFileResponse(env.BOT_TOKEN, fileId);
 	if (!file) return json({ error: "не удалось получить файл из Telegram" }, 502);
 	return new Response(file.body, {
 		headers: { "content-type": "image/jpeg", ...CORS_HEADERS },
@@ -406,8 +425,8 @@ const BOT_COMMANDS = [
 	{ command: "today", description: "Начать повторение карточек" },
 	{ command: "status", description: "Статистика изучения" },
 	{ command: "settings", description: "Сколько карточек в день" },
-	{ command: "speaker", description: "Выступить с докладом — выбрать тему" },
-	{ command: "cancel", description: "Прервать заявку на доклад" },
+	{ command: "speaker", description: "Выступить с докладом или вступить в клуб" },
+	{ command: "cancel", description: "Прервать заявку" },
 	{ command: "help", description: "Помощь и список команд" },
 	{ command: "anons_here", description: "Постить анонсы встреч в этот чат (админ)" },
 	{ command: "start", description: "Подписка на ежедневные карточки" },
@@ -476,6 +495,157 @@ async function handleAdminAnnounce(env: Env, request: Request): Promise<Response
 		// показала осмысленную подсказку вместо «что-то пошло не так».
 		return json({ error: message }, message.includes("Чат для анонсов") ? 409 : 502);
 	}
+}
+
+// ── Участие в клубе: заявки и брони тем (для miniapp и CMS) ───────────────────
+
+/** Сколько текста ждём от заявителя: имя и рассказ о себе. */
+const NAME_LIMITS = { min: 2, max: 80 };
+const ABOUT_LIMITS = { min: 10, max: 2000 };
+
+/**
+ * Статус участия текущего пользователя: GET /api/membership.
+ * Пока `registered` = false, темы докладов брать нельзя — miniapp показывает
+ * форму заявки вместо списка тем.
+ */
+async function handleMembership(env: Env, userId: number): Promise<Response> {
+	const user = await getUser(env.BOOK_CLUB_DB, userId);
+	const access = await speakerAccess(env, userId, user?.username);
+	return json({
+		registered: access.registered,
+		status: access.request?.status ?? (access.registered ? "approved" : "none"),
+		full_name: access.fullName,
+		about: access.request?.about ?? null,
+		speaker: access.speaker ? { id: access.speaker.id, name: access.speaker.name } : null,
+	});
+}
+
+/** Заявка на участие из miniapp: POST /api/membership { full_name, about }. */
+async function handleApply(env: Env, userId: number, request: Request): Promise<Response> {
+	let body: { full_name?: string; about?: string };
+	try {
+		body = (await request.json()) as typeof body;
+	} catch {
+		return json({ error: "невалидный JSON" }, 400);
+	}
+	const fullName = (body.full_name ?? "").trim();
+	const about = (body.about ?? "").trim();
+	if (fullName.length < NAME_LIMITS.min || fullName.length > NAME_LIMITS.max) {
+		return json({ error: "имя и фамилия: от 2 до 80 символов" }, 400);
+	}
+	if (about.length < ABOUT_LIMITS.min || about.length > ABOUT_LIMITS.max) {
+		return json({ error: "расскажите о себе — от 10 до 2000 символов" }, 400);
+	}
+
+	const user = await getUser(env.BOOK_CLUB_DB, userId);
+	const access = await speakerAccess(env, userId, user?.username);
+	// Участник клуба заявку не подаёт — ему сразу доступны темы.
+	if (access.registered) return json({ registered: true, status: "approved" });
+
+	const saved = await saveMembershipRequest(env.BOOK_CLUB_DB, {
+		chatId: userId,
+		username: user?.username ?? null,
+		fullName,
+		about,
+		photoUrl: user?.photo_url ?? null,
+		source: "miniapp",
+	});
+	if (saved) await notifyAdminMembership(env, saved);
+	return json({ registered: false, status: saved?.status ?? "pending" });
+}
+
+/**
+ * Бронь темы доклада из miniapp: POST /api/claim { topic_id }.
+ * Тот же путь, что и кнопка в боте: проверка участия → заявка в D1 → админу.
+ */
+async function handleClaimTopic(env: Env, userId: number, request: Request): Promise<Response> {
+	let body: { topic_id?: string };
+	try {
+		body = (await request.json()) as typeof body;
+	} catch {
+		return json({ error: "невалидный JSON" }, 400);
+	}
+	const topicId = (body.topic_id ?? "").trim();
+	if (!topicId) return json({ error: "нужен topic_id" }, 400);
+
+	const user = await getUser(env.BOOK_CLUB_DB, userId);
+	const access = await speakerAccess(env, userId, user?.username);
+	if (!access.registered) {
+		return json(
+			{
+				error: "темы докладов берут участники клуба — сначала заявка на участие",
+				status: access.request?.status ?? "none",
+			},
+			403,
+		);
+	}
+
+	// План — источник истины по темам: бронировать можно только тему будущего эфира.
+	const plan = (await fetchPlanTopics()).find((t) => t.topic.id === topicId);
+	if (!plan) return json({ error: "этой темы нет в плане" }, 404);
+
+	const claim = await createSpeakerClaim(env.BOOK_CLUB_DB, {
+		topicId: plan.topic.id,
+		topicTitle: plan.topic.title,
+		bookId: plan.bookId,
+		chapter: plan.chapterSlug,
+		chatId: userId,
+		username: user?.username ?? undefined,
+	});
+	if (!claim) return json({ error: "тему только что заняли" }, 409);
+
+	await completeClaim(env, claim, access, user?.username ?? undefined);
+	return json({ ok: true, topic_title: plan.topic.title, status: "pending" });
+}
+
+/** Заявки на участие для CMS: GET /api/admin/members. */
+async function handleAdminMembers(env: Env): Promise<Response> {
+	return json({ members: await listMembershipRequests(env.BOOK_CLUB_DB) });
+}
+
+/**
+ * Решение по заявке на участие: POST /api/admin/members { id, action }.
+ * approve — человек может брать темы; decline — заявку можно отправить заново.
+ */
+async function handleAdminMemberDecision(env: Env, request: Request): Promise<Response> {
+	let body: { id?: number; action?: string };
+	try {
+		body = (await request.json()) as typeof body;
+	} catch {
+		return json({ error: "невалидный JSON" }, 400);
+	}
+	if (body.action !== "approve" && body.action !== "decline") {
+		return json({ error: "action: approve | decline" }, 400);
+	}
+	const id = Number(body.id);
+	if (!Number.isFinite(id) || !(await getMembershipRequestById(env.BOOK_CLUB_DB, id))) {
+		return json({ error: "заявка не найдена" }, 404);
+	}
+
+	const member = await setMembershipStatus(
+		env.BOOK_CLUB_DB,
+		id,
+		body.action === "approve" ? "approved" : "declined",
+	);
+	// Заявку могли отправить из браузера, ни разу не написав боту — тогда
+	// сообщение не доставить, и это не повод считать решение неудачным.
+	if (member?.chat_id) {
+		try {
+			await sendMessage(
+				env.BOT_TOKEN,
+				member.chat_id,
+				body.action === "approve"
+					? "🎉 <b>Добро пожаловать в клуб!</b>\n\n" +
+							"Заявку одобрили — теперь можно взять тему доклада: /speaker " +
+							"или в приложении клуба на вкладке «Встречи»."
+					: "Заявку на участие пока не одобрили 😔\n\n" +
+							"Можно отправить её заново, добавив подробностей о себе: /speaker",
+			);
+		} catch (err) {
+			console.warn(`Не удалось сообщить решение по заявке ${id}:`, err);
+		}
+	}
+	return json({ ok: true, member });
 }
 
 // ── Платформа: вход через Telegram и единый прогресс карточек ─────────────────
@@ -619,11 +789,22 @@ async function routeApi(env: Env, request: Request, url: URL): Promise<Response>
 		url.pathname === "/api/me" ||
 		url.pathname === "/api/progress" ||
 		url.pathname === "/api/review" ||
-		url.pathname === "/api/settings"
+		url.pathname === "/api/settings" ||
+		url.pathname === "/api/membership" ||
+		url.pathname === "/api/claim"
 	) {
 		const userId = await authUser(env, request);
 		if (userId === null) return json({ error: "нужен вход через Telegram" }, 401);
 		if (url.pathname === "/api/me" && request.method === "GET") return handleMe(env, userId);
+		if (url.pathname === "/api/membership" && request.method === "GET") {
+			return handleMembership(env, userId);
+		}
+		if (url.pathname === "/api/membership" && request.method === "POST") {
+			return handleApply(env, userId, request);
+		}
+		if (url.pathname === "/api/claim" && request.method === "POST") {
+			return handleClaimTopic(env, userId, request);
+		}
 		if (url.pathname === "/api/progress" && request.method === "GET") {
 			return handleProgress(env, userId);
 		}
@@ -648,6 +829,12 @@ async function routeApi(env: Env, request: Request, url: URL): Promise<Response>
 		}
 		if (url.pathname === "/api/admin/photo" && request.method === "GET") {
 			return handleAdminPhoto(env, url);
+		}
+		if (url.pathname === "/api/admin/members" && request.method === "GET") {
+			return handleAdminMembers(env);
+		}
+		if (url.pathname === "/api/admin/members" && request.method === "POST") {
+			return handleAdminMemberDecision(env, request);
 		}
 		if (url.pathname === "/api/admin/setup" && request.method === "POST") {
 			return handleAdminSetup(env);

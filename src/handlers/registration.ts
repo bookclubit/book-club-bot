@@ -1,31 +1,33 @@
-// Запись на встречи и заявки спикеров.
+// Запись на встречи, заявки на участие в клубе и брони тем докладов.
 //
 // «Пойду» (диплинк /start join_<eventId>): запись в D1, сразу ссылки,
-// напоминания — утром в день встречи и в начале встречи (cron).
+// напоминания — утром в день встречи и в начале встречи (cron). Открыто всем.
 //
-// «Стать спикером» (/speaker или диплинк /start speaker): темы — главы
-// будущих встреч-«докладов»; занятые (заявки D1 — единый источник) скрыты.
-// Диалог: тема → ФИО → фото (для вернувшегося спикера пропускается). Модерация —
-// в CMS (боту админ ничего не жмёт, только получает уведомление со ссылкой).
+// «Стать спикером» (/speaker или диплинк /start speaker): темы берут только
+// участники клуба (каталог спикеров или одобренная заявка — см. lib/members.ts).
+// Новый человек отправляет заявку на участие: имя → рассказ о себе → фото.
+// Модерация — в CMS (боту админ ничего не жмёт, только получает уведомление).
 
 import type { InlineKeyboardMarkup, TelegramCallbackQuery, TelegramMessage } from "../types";
 import {
 	addRegistration,
 	clearDialog,
 	createSpeakerClaim,
+	dialogDraft,
 	getDialog,
 	getSpeakerClaim,
-	getSpeakerProfile,
 	listSpeakerClaims,
+	saveMembershipRequest,
 	saveSpeakerIdentity,
 	setDialog,
 	updateSpeakerClaim,
+	type MembershipRequest,
 	type SpeakerClaim,
 } from "../lib/db";
-import { fetchIndex } from "../lib/api";
+import { esc } from "../lib/announce";
 import { fetchEventById, renderEventLinks } from "../lib/events";
+import { speakerAccess, type SpeakerAccess } from "../lib/members";
 import { fetchPlanTopics, type PlanTopic } from "../lib/plan";
-import { findSpeakerByUsername } from "../lib/speakers";
 import { answerCallback, editMessageText, sendMessage } from "../lib/telegram";
 
 /**
@@ -60,7 +62,91 @@ export async function handleJoin(env: Env, message: TelegramMessage, eventId: st
 	console.log(`Запись на ${event.id}: ${chatId}`);
 }
 
-// ── Заявка спикера: выбор темы ───────────────────────────────────────────────
+// ── Заявка на участие в клубе ────────────────────────────────────────────────
+
+/** Кнопка заявки: у ждущей решения — «дополнить», у новой — «отправить». */
+function applyKeyboard(request: MembershipRequest | null): InlineKeyboardMarkup {
+	const text = request && request.status !== "approved" ? "✏️ Дополнить заявку" : "📝 Отправить заявку";
+	return { inline_keyboard: [[{ text, callback_data: "mapply" }]] };
+}
+
+/** Текст для того, кто пока не участник: что дальше и почему темы закрыты. */
+export function membershipPrompt(request: MembershipRequest | null): string {
+	if (request?.status === "pending") {
+		return (
+			"⏳ <b>Заявка на участие уже у админа</b>\n\n" +
+			"Как только её одобрят — напишу, и можно будет взять тему доклада.\n\n" +
+			"Хочешь что-то добавить о себе — отправь заявку заново, она обновится."
+		);
+	}
+	if (request?.status === "declined") {
+		return (
+			"Заявку на участие пока не одобрили 😔\n\n" +
+			"Это не приговор: отправь её заново, добавив подробностей о себе и о том, " +
+			"о чём хочешь рассказать клубу."
+		);
+	}
+	return (
+		"🎤 <b>Хочешь выступить — здорово!</b>\n\n" +
+		"Темы докладов берут участники клуба, а тебя я пока не знаю. " +
+		"Отправь заявку на участие: расскажи о себе — админ посмотрит и откроет доступ к темам.\n\n" +
+		"А слушать и приходить на встречи можно уже сейчас: план — в приложении клуба."
+	);
+}
+
+/** Уведомление админу о заявке на участие: решение принимается в CMS. */
+export async function notifyAdminMembership(env: Env, request: MembershipRequest): Promise<void> {
+	if (!env.ADMIN_CHAT_ID) {
+		console.warn("ADMIN_CHAT_ID не задан — заявка на участие ждёт в CMS без уведомления");
+		return;
+	}
+	// Имя и рассказ пишет человек — экранируем, иначе «<» сломает разбор HTML.
+	const who = [request.full_name, request.username ? `@${request.username}` : null]
+		.filter(Boolean)
+		.map((s) => esc(String(s)))
+		.join(", ");
+	await sendMessage(
+		env.BOT_TOKEN,
+		Number(env.ADMIN_CHAT_ID),
+		"🙋 <b>Новая заявка на участие в клубе</b>\n\n" +
+			`Кто: ${who || `id ${request.chat_id}`}\n` +
+			`Откуда: ${request.source === "miniapp" ? "приложение клуба" : "бот"}\n` +
+			`Фото: ${request.photo_file_id ? "есть" : request.photo_url ? "аватар Telegram" : "нет"}\n\n` +
+			`О себе: ${request.about ? esc(request.about) : "—"}\n\n` +
+			`Принять или отклонить: ${cmsClaimsUrl(env)}`,
+	);
+}
+
+/** Кнопка «Отправить заявку»: mapply — начинаем диалог знакомства. */
+export async function handleApplyCallback(env: Env, cb: TelegramCallbackQuery): Promise<void> {
+	const message = cb.message;
+	if (!message) {
+		await answerCallback(env.BOT_TOKEN, cb.id);
+		return;
+	}
+	await answerCallback(env.BOT_TOKEN, cb.id);
+	await startMembershipDialog(env, message.chat.id, cb.from.first_name, cb.from.last_name);
+}
+
+/** Первый шаг заявки: имя и фамилия (по умолчанию — как в Telegram). */
+export async function startMembershipDialog(
+	env: Env,
+	chatId: number,
+	firstName?: string,
+	lastName?: string,
+): Promise<void> {
+	const telegramName = [firstName, lastName].filter(Boolean).join(" ");
+	await setDialog(env.BOOK_CLUB_DB, chatId, "apply_name", null, telegramName ? { telegramName } : null);
+	await sendMessage(
+		env.BOT_TOKEN,
+		chatId,
+		"Давай знакомиться 👋\n\nНапиши имя и фамилию — так тебя объявят в программе." +
+			(telegramName ? `\n\n/skip — оставить «${esc(telegramName)}» из Telegram.` : "") +
+			"\n\nПрервать — /cancel",
+	);
+}
+
+// ── Брони тем докладов ───────────────────────────────────────────────────────
 
 // Свободные темы: не занятые заявкой D1 (единый источник занятости).
 function freeTopics(topics: PlanTopic[], claims: SpeakerClaim[]): PlanTopic[] {
@@ -89,6 +175,18 @@ function speakerIntro(free: PlanTopic[]): string {
 }
 
 export async function handleSpeaker(env: Env, message: TelegramMessage): Promise<void> {
+	const access = await speakerAccess(env, message.chat.id, message.from?.username);
+	// Не участник клуба — темы не показываем, предлагаем заявку на участие.
+	if (!access.registered) {
+		await sendMessage(
+			env.BOT_TOKEN,
+			message.chat.id,
+			membershipPrompt(access.request),
+			applyKeyboard(access.request),
+		);
+		return;
+	}
+
 	const [topics, claims] = await Promise.all([
 		fetchPlanTopics(),
 		listSpeakerClaims(env.BOOK_CLUB_DB),
@@ -105,84 +203,47 @@ async function notifyAdmin(env: Env, claim: SpeakerClaim): Promise<void> {
 	}
 	const from = [claim.full_name, claim.username ? `@${claim.username}` : null]
 		.filter(Boolean)
+		.map((s) => esc(String(s)))
 		.join(", ");
 	await sendMessage(
 		env.BOT_TOKEN,
 		Number(env.ADMIN_CHAT_ID),
 		`🎤 <b>Новая заявка на доклад</b>\n\n` +
-			`Тема: <b>${claim.topic_title}</b>${claim.topic_id ? "" : " (своя, вне плана)"}\n` +
-			`Спикер: ${from || `id ${claim.chat_id}`}${claim.speaker_id ? " · узнан по Telegram ✓" : " · новый, сверь личность"}\n` +
+			`Тема: <b>${esc(claim.topic_title)}</b>${claim.topic_id ? "" : " (своя, вне плана)"}\n` +
+			`Спикер: ${from || `id ${claim.chat_id}`}${claim.speaker_id ? " · из каталога клуба ✓" : " · участник клуба"}\n` +
 			`Фото: ${claim.photo_file_id ? "есть" : claim.speaker_id ? "из каталога" : "нет"}\n\n` +
 			`Подтвердить или отклонить: ${cmsClaimsUrl(env)}`,
 	);
 }
 
 /**
- * Если заявитель уже известен — заполняет новую заявку его именем/фото,
- * отправляет админу и возвращает имя. Источники (по приоритету):
- *   1) каталог CMS — Telegram username совпал с socials.telegram спикера;
- *   2) прошлые заявки этого пользователя в боте.
- * Иначе null — нужен обычный диалог имя → фото.
+ * Дозаполняет заявку на тему тем, что уже известно об участнике (имя, каталожный
+ * id, фото), запоминает личность и уведомляет админа. Спрашивать нечего: темы
+ * берут только участники клуба, а их данные бот уже знает.
  */
-async function finalizeIfKnownSpeaker(
+export async function completeClaim(
 	env: Env,
-	chatId: number,
-	claimId: number,
+	claim: SpeakerClaim,
+	access: SpeakerAccess,
 	username?: string,
-): Promise<string | null> {
-	let fullName: string | null = null;
-	let speakerId: string | null = null;
-	let photoFileId: string | null = null;
-
-	// 1) Каталог спикеров: узнаём по Telegram-нику.
-	if (username) {
-		const index = await fetchIndex();
-		const speaker = findSpeakerByUsername(index, username);
-		if (speaker) {
-			fullName = speaker.name;
-			speakerId = speaker.id;
-		}
-	}
-	// 2) Прошлые заявки в боте.
-	if (!fullName) {
-		const profile = await getSpeakerProfile(env.BOOK_CLUB_DB, chatId);
-		if (profile) {
-			fullName = profile.fullName;
-			speakerId = profile.speakerId;
-			photoFileId = profile.photoFileId;
-		}
-	}
-	if (!fullName) return null;
-
-	await updateSpeakerClaim(env.BOOK_CLUB_DB, claimId, {
-		fullName,
-		...(speakerId ? { speakerId } : {}),
-		...(photoFileId ? { photoFileId } : {}),
+): Promise<void> {
+	await updateSpeakerClaim(env.BOOK_CLUB_DB, claim.id, {
+		...(access.fullName ? { fullName: access.fullName } : {}),
+		...(access.speaker ? { speakerId: access.speaker.id } : {}),
+		...(access.photoFileId ? { photoFileId: access.photoFileId } : {}),
 	});
-	// Запоминаем личность устойчиво — переживёт удаление заявок при отклонении.
-	await saveSpeakerIdentity(env.BOOK_CLUB_DB, { chatId, fullName, speakerId, photoFileId, username });
-	await clearDialog(env.BOOK_CLUB_DB, chatId);
-	const claim = await getSpeakerClaim(env.BOOK_CLUB_DB, claimId);
-	if (claim) await notifyAdmin(env, claim);
-	return fullName;
-}
-
-const EXPERIENCE_KEYBOARD: InlineKeyboardMarkup = {
-	inline_keyboard: [
-		[{ text: "Да, я уже выступал", callback_data: "sexp_y" }],
-		[{ text: "Нет, впервые", callback_data: "sexp_n" }],
-	],
-};
-
-/** Спрашиваем, выступал ли человек раньше (после брони темы). */
-async function promptExperience(env: Env, chatId: number, claimId: number): Promise<void> {
-	await setDialog(env.BOOK_CLUB_DB, chatId, "experience", claimId);
-	await sendMessage(
-		env.BOT_TOKEN,
-		chatId,
-		"Ты уже выступал в клубе с докладом?",
-		EXPERIENCE_KEYBOARD,
-	);
+	if (claim.chat_id) {
+		await saveSpeakerIdentity(env.BOOK_CLUB_DB, {
+			chatId: claim.chat_id,
+			fullName: access.fullName,
+			speakerId: access.speaker?.id ?? null,
+			photoFileId: access.photoFileId,
+			username,
+		});
+	}
+	await clearDialog(env.BOOK_CLUB_DB, claim.chat_id);
+	const saved = await getSpeakerClaim(env.BOOK_CLUB_DB, claim.id);
+	if (saved) await notifyAdmin(env, saved);
 }
 
 /** Нажатие на свободную тему плана: sclaim:<topicId>. */
@@ -192,7 +253,23 @@ export async function handleClaimCallback(env: Env, cb: TelegramCallbackQuery, d
 		await answerCallback(env.BOT_TOKEN, cb.id);
 		return;
 	}
+	const chatId = message.chat.id;
 	const topicId = data.slice("sclaim:".length);
+
+	// Клавиатура могла остаться от прошлой сессии — проверяем доступ ещё раз.
+	const access = await speakerAccess(env, chatId, cb.from.username);
+	if (!access.registered) {
+		await answerCallback(env.BOT_TOKEN, cb.id, "Нужна заявка на участие");
+		await editMessageText(
+			env.BOT_TOKEN,
+			chatId,
+			message.message_id,
+			membershipPrompt(access.request),
+			applyKeyboard(access.request),
+		);
+		return;
+	}
+
 	const topics = await fetchPlanTopics();
 	const plan = topics.find((t) => t.topic.id === topicId);
 	if (!plan) {
@@ -205,7 +282,7 @@ export async function handleClaimCallback(env: Env, cb: TelegramCallbackQuery, d
 		topicTitle: plan.topic.title,
 		bookId: plan.bookId,
 		chapter: plan.chapterSlug,
-		chatId: message.chat.id,
+		chatId,
 		username: cb.from.username,
 	});
 
@@ -214,7 +291,7 @@ export async function handleClaimCallback(env: Env, cb: TelegramCallbackQuery, d
 		const claims = await listSpeakerClaims(env.BOOK_CLUB_DB);
 		await editMessageText(
 			env.BOT_TOKEN,
-			message.chat.id,
+			chatId,
 			message.message_id,
 			"Эту тему только что заняли 🙈 Выбери другую:",
 			speakerKeyboard(freeTopics(topics, claims)),
@@ -223,82 +300,15 @@ export async function handleClaimCallback(env: Env, cb: TelegramCallbackQuery, d
 		return;
 	}
 
-	// Вернувшийся спикер — имя/фото уже знаем, диалог не нужен.
-	const knownName = await finalizeIfKnownSpeaker(env, message.chat.id, claim.id, cb.from.username);
-	if (knownName) {
-		await editMessageText(
-			env.BOT_TOKEN,
-			message.chat.id,
-			message.message_id,
-			`Тема «<b>${plan.topic.title}</b>» забронирована за тобой 🎉\n\n` +
-				`Узнал тебя, <b>${knownName}</b> — заявка уже у админа. Как подтвердят, напишу!`,
-		);
-		await answerCallback(env.BOT_TOKEN, cb.id, "Тема забронирована");
-		return;
-	}
-
-	// Не узнали автоматически — спрашиваем, выступал ли раньше.
-	await editMessageText(
-		env.BOT_TOKEN,
-		message.chat.id,
-		message.message_id,
-		`Тема «<b>${plan.topic.title}</b>» забронирована за тобой 🎉`,
-	);
-	await answerCallback(env.BOT_TOKEN, cb.id, "Тема забронирована");
-	await promptExperience(env, message.chat.id, claim.id);
-}
-
-/** Ответ на вопрос об опыте: sexp_y (да) / sexp_n (нет). */
-export async function handleExperienceCallback(env: Env, cb: TelegramCallbackQuery, isYes: boolean): Promise<void> {
-	const message = cb.message;
-	if (!message) {
-		await answerCallback(env.BOT_TOKEN, cb.id);
-		return;
-	}
-	const chatId = message.chat.id;
-	const dialog = await getDialog(env.BOOK_CLUB_DB, chatId);
-	if (!dialog || dialog.step !== "experience" || dialog.claim_id === null) {
-		await answerCallback(env.BOT_TOKEN, cb.id, "Начни заново: /speaker");
-		return;
-	}
-	const claimId = dialog.claim_id;
-	await answerCallback(env.BOT_TOKEN, cb.id);
-
-	// Впервые — знакомимся: имя → фото (создастся новый спикер после апрува).
-	if (!isYes) {
-		await setDialog(env.BOOK_CLUB_DB, chatId, "name", claimId);
-		await editMessageText(
-			env.BOT_TOKEN,
-			chatId,
-			message.message_id,
-			"Тогда познакомимся! 👋 Напиши имя и фамилию — так объявим тебя в программе:",
-		);
-		return;
-	}
-
-	// Уже выступал — пробуем узнать по Telegram/прошлым заявкам.
-	const knownName = await finalizeIfKnownSpeaker(env, chatId, claimId, cb.from.username);
-	if (knownName) {
-		await editMessageText(
-			env.BOT_TOKEN,
-			chatId,
-			message.message_id,
-			`Узнал тебя, <b>${knownName}</b> — заявка уже у админа. Как подтвердят, напишу! 🎉`,
-		);
-		return;
-	}
-
-	// Не узнали автоматически. Самовыбор из каталога НЕ предлагаем (иначе можно
-	// выдать себя за другого спикера) — просим представиться, а связать заявку
-	// с существующим профилем в каталоге решает админ при модерации в CMS.
-	await setDialog(env.BOOK_CLUB_DB, chatId, "name", claimId);
+	await completeClaim(env, claim, access, cb.from.username);
 	await editMessageText(
 		env.BOT_TOKEN,
 		chatId,
 		message.message_id,
-		"Не узнал тебя по Telegram-нику 🤔 Напиши имя и фамилию — так объявим тебя в программе, " +
-			"а админ свяжет заявку с твоим профилем в каталоге.",
+		`Тема «<b>${esc(plan.topic.title)}</b>» забронирована за тобой 🎉\n\n` +
+			"Заявка ушла админу — как подтвердят, напишу и пришлю шаблон презентации.",
 	);
+	await answerCallback(env.BOT_TOKEN, cb.id, "Тема забронирована");
 }
 
 /** Нажатие на занятую тему: staken:<topicId> — показываем, кем занята. */
@@ -323,15 +333,27 @@ export async function handleCustomTopicCallback(env: Env, cb: TelegramCallbackQu
 		await answerCallback(env.BOT_TOKEN, cb.id);
 		return;
 	}
+	const access = await speakerAccess(env, message.chat.id, cb.from.username);
+	if (!access.registered) {
+		await answerCallback(env.BOT_TOKEN, cb.id, "Нужна заявка на участие");
+		await editMessageText(
+			env.BOT_TOKEN,
+			message.chat.id,
+			message.message_id,
+			membershipPrompt(access.request),
+			applyKeyboard(access.request),
+		);
+		return;
+	}
 	await setDialog(env.BOOK_CLUB_DB, message.chat.id, "custom_topic", null);
 	await answerCallback(env.BOT_TOKEN, cb.id);
 	await sendMessage(env.BOT_TOKEN, message.chat.id, "Напиши тему доклада одним сообщением ✍️");
 }
 
-// ── Диалог заявки (тема → ФИО → фото) ────────────────────────────────────────
+// ── Диалоги (своя тема; заявка на участие: имя → о себе → фото) ───────────────
 
 /**
- * Сообщение пользователя, когда идёт диалог заявки.
+ * Сообщение пользователя, когда идёт диалог.
  * true — сообщение обработано, роутить дальше не нужно.
  */
 export async function handleDialogMessage(env: Env, message: TelegramMessage): Promise<boolean> {
@@ -340,9 +362,16 @@ export async function handleDialogMessage(env: Env, message: TelegramMessage): P
 	if (!dialog) return false;
 
 	const text = message.text?.trim();
+	const draft = dialogDraft(dialog);
 
 	if (dialog.step === "custom_topic") {
 		if (!text) return false;
+		const access = await speakerAccess(env, chatId, message.from?.username);
+		if (!access.registered) {
+			await clearDialog(env.BOOK_CLUB_DB, chatId);
+			await sendMessage(env.BOT_TOKEN, chatId, membershipPrompt(access.request), applyKeyboard(access.request));
+			return true;
+		}
 		const claim = await createSpeakerClaim(env.BOOK_CLUB_DB, {
 			topicId: null,
 			topicTitle: text,
@@ -351,70 +380,82 @@ export async function handleDialogMessage(env: Env, message: TelegramMessage): P
 		});
 		if (!claim) return true;
 
-		// Вернувшийся спикер — имя/фото уже знаем, диалог не нужен.
-		const knownName = await finalizeIfKnownSpeaker(env, chatId, claim.id, message.from?.username);
-		if (knownName) {
+		await completeClaim(env, claim, access, message.from?.username);
+		await sendMessage(
+			env.BOT_TOKEN,
+			chatId,
+			`Тема «<b>${esc(text)}</b>» записана — заявка ушла админу 🎉 Как подтвердят, напишу!`,
+		);
+		return true;
+	}
+
+	// Заявка на участие: имя.
+	if (dialog.step === "apply_name") {
+		const fullName = text === "/skip" ? draft.telegramName : text;
+		if (!fullName) {
+			await sendMessage(env.BOT_TOKEN, chatId, "Напиши имя и фамилию текстом 🙏");
+			return true;
+		}
+		await setDialog(env.BOOK_CLUB_DB, chatId, "apply_about", null, { ...draft, fullName });
+		await sendMessage(
+			env.BOT_TOKEN,
+			chatId,
+				`Приятно познакомиться, <b>${esc(fullName)}</b>!\n\n` +
+				"Расскажи о себе одним сообщением: чем занимаешься, какой опыт и о чём хотел бы " +
+				"рассказать клубу. Это сообщение увидит админ.",
+		);
+		return true;
+	}
+
+	// Заявка на участие: рассказ о себе (сообщение для админа).
+	if (dialog.step === "apply_about") {
+		if (!text || text === "/skip") {
 			await sendMessage(
 				env.BOT_TOKEN,
 				chatId,
-				`Тема «<b>${text}</b>» записана. Узнал тебя, <b>${knownName}</b> — заявка отправлена админу 🎉 Как подтвердят, напишу!`,
+				"Пары предложений достаточно — но без них заявку не отправить 🙂",
 			);
 			return true;
 		}
-
-		// Не узнали — спрашиваем про опыт.
-		await sendMessage(env.BOT_TOKEN, chatId, `Тема «<b>${text}</b>» записана.`);
-		await promptExperience(env, chatId, claim.id);
-		return true;
-	}
-
-	if (dialog.step === "name") {
-		if (!text) return false;
-		if (dialog.claim_id !== null) {
-			await updateSpeakerClaim(env.BOOK_CLUB_DB, dialog.claim_id, { fullName: text });
-		}
-		await saveSpeakerIdentity(env.BOOK_CLUB_DB, {
-			chatId,
-			fullName: text,
-			username: message.from?.username,
-		});
-		await setDialog(env.BOOK_CLUB_DB, chatId, "photo", dialog.claim_id);
+		await setDialog(env.BOOK_CLUB_DB, chatId, "apply_photo", null, { ...draft, about: text });
 		await sendMessage(
 			env.BOT_TOKEN,
 			chatId,
-			"И последнее: пришли своё фото для аватарки 📸 (или напиши /skip — добавим позже).",
+			"И последнее: пришли своё фото для аватарки 📸 (или /skip — добавим позже).",
 		);
 		return true;
 	}
 
-	if (dialog.step === "photo") {
-		// Ждём фото или /skip.
+	// Заявка на участие: фото (или /skip) — и отправляем админу.
+	if (dialog.step === "apply_photo") {
 		const photo = message.photo?.at(-1);
 		if (!photo && text !== "/skip") return false;
-		if (photo && dialog.claim_id !== null) {
-			await updateSpeakerClaim(env.BOOK_CLUB_DB, dialog.claim_id, { photoFileId: photo.file_id });
-		}
-		if (photo) {
-			await saveSpeakerIdentity(env.BOOK_CLUB_DB, { chatId, photoFileId: photo.file_id });
-		}
+		const request = await saveMembershipRequest(env.BOOK_CLUB_DB, {
+			chatId,
+			username: message.from?.username,
+			fullName: draft.fullName,
+			about: draft.about,
+			photoFileId: photo?.file_id,
+			source: "bot",
+		});
 		await clearDialog(env.BOOK_CLUB_DB, chatId);
-
-		const claim = dialog.claim_id !== null ? await getSpeakerClaim(env.BOOK_CLUB_DB, dialog.claim_id) : null;
 		await sendMessage(
 			env.BOT_TOKEN,
 			chatId,
-			"Заявка отправлена админу 🎉 Как только её подтвердят — напишу. Спасибо, что выступаешь!",
+			"Заявка отправлена админу 🎉 Как только её одобрят — напишу, и можно будет " +
+				"выбрать тему доклада: /speaker\n\n" +
+				"А пока приходи на встречи — план в приложении клуба.",
 		);
-		if (claim) await notifyAdmin(env, claim);
+		if (request) await notifyAdminMembership(env, request);
 		return true;
 	}
 
-	// step === "experience": ждём нажатие кнопки (Да/Нет), а не текст.
-	await sendMessage(env.BOT_TOKEN, chatId, "Выбери вариант кнопкой выше 👆");
-	return true;
+	// Шаг из старой версии бота — не мучаем человека, начинаем с чистого листа.
+	await clearDialog(env.BOOK_CLUB_DB, chatId);
+	return false;
 }
 
-/** /cancel — прервать диалог заявки. */
+/** /cancel — прервать диалог (своя тема или заявка на участие). */
 export async function handleCancel(env: Env, message: TelegramMessage): Promise<void> {
 	await clearDialog(env.BOOK_CLUB_DB, message.chat.id);
 	await sendMessage(env.BOT_TOKEN, message.chat.id, "Ок, отменил. Начать заново — /speaker");

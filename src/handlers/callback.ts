@@ -5,9 +5,9 @@ import { DAILY_CARD_OPTIONS, setDailyCards } from "../lib/db";
 import { handleStudyFlip, handleStudyGrade } from "../lib/study";
 import { answerCallback, editMessageText } from "../lib/telegram";
 import {
+	handleApplyCallback,
 	handleClaimCallback,
 	handleCustomTopicCallback,
-	handleExperienceCallback,
 	handleTakenCallback,
 } from "./registration";
 
@@ -23,11 +23,11 @@ export async function handleCallback(env: Env, cb: TelegramCallbackQuery): Promi
 		return;
 	}
 
-	// Заявки на доклады (см. handlers/registration.ts).
+	// Заявки на доклады и на участие в клубе (см. handlers/registration.ts).
 	if (data.startsWith("sclaim:")) return handleClaimCallback(env, cb, data);
 	if (data.startsWith("staken:")) return handleTakenCallback(env, cb, data);
 	if (data === "scustom") return handleCustomTopicCallback(env, cb);
-	if (data === "sexp_y" || data === "sexp_n") return handleExperienceCallback(env, cb, data === "sexp_y");
+	if (data === "mapply") return handleApplyCallback(env, cb);
 
 	// Повторение карточек (текущая карточка — из сессии в D1).
 	if (data === "sf") return handleStudyFlip(env, cb);

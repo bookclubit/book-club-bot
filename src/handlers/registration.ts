@@ -448,7 +448,12 @@ export async function handleDialogMessage(env: Env, message: TelegramMessage): P
 			chatId,
 			"Заявка отправлена админу 🎉 Как только её одобрят — напишу, и можно будет " +
 				"выбрать тему доклада: /speaker\n\n" +
-				"А пока приходи на встречи — план в приложении клуба.",
+				"А пока приходи на встречи — план в приложении клуба." +
+				// Профиль спикера в каталоге клуба заводится по @username.
+				(message.from?.username
+					? ""
+					: "\n\n⚠️ У тебя не задан <b>@username</b> в Telegram — задай его в настройках, " +
+						"иначе клуб не сможет оформить тебе профиль спикера."),
 		);
 		if (request) await notifyAdminMembership(env, request);
 		return true;

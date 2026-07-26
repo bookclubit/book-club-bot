@@ -37,7 +37,7 @@ import {
 	type MembershipRequest,
 } from "../src/lib/db";
 import { speakerAccess } from "../src/lib/members";
-import { membershipPrompt } from "../src/handlers/registration";
+import { membershipPrompt, speakerIntro } from "../src/handlers/registration";
 import {
 	mintSession,
 	verifyInitData,
@@ -665,6 +665,22 @@ describe("Участие в клубе: темы берут только уча�
 		expect(membershipPrompt(null)).toContain("заявку на участие");
 		expect(membershipPrompt({ status: "pending" } as MembershipRequest)).toContain("у админа");
 		expect(membershipPrompt({ status: "declined" } as MembershipRequest)).toContain("заново");
+	});
+
+	it("участнику без свободных тем говорим прямо, свою тему не предлагаем", () => {
+		const empty = speakerIntro([]);
+		expect(empty).toContain("Свободных тем сейчас нет");
+		expect(empty).not.toContain("свою");
+
+		const withTopics = speakerIntro([
+			{
+				topic: { id: "t1", title: "Архитектура" },
+				bookId: "docker",
+				bookTitle: "Docker. Вводный курс",
+				chapterSlug: "02-obschie",
+			},
+		]);
+		expect(withTopics).toContain("Docker. Вводный курс");
 	});
 
 	it("бронь темы требует входа, модерация — админ-токена", async () => {

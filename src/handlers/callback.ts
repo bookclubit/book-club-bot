@@ -4,12 +4,7 @@ import type { Grade, TelegramCallbackQuery } from "../types";
 import { DAILY_CARD_OPTIONS, setDailyCards } from "../lib/db";
 import { handleStudyFlip, handleStudyGrade } from "../lib/study";
 import { answerCallback, editMessageText } from "../lib/telegram";
-import {
-	handleApplyCallback,
-	handleClaimCallback,
-	handleCustomTopicCallback,
-	handleTakenCallback,
-} from "./registration";
+import { handleApplyCallback, handleClaimCallback, handleTakenCallback } from "./registration";
 
 const VALID_GRADES: readonly Grade[] = ["again", "hard", "easy"];
 
@@ -26,7 +21,6 @@ export async function handleCallback(env: Env, cb: TelegramCallbackQuery): Promi
 	// Заявки на доклады и на участие в клубе (см. handlers/registration.ts).
 	if (data.startsWith("sclaim:")) return handleClaimCallback(env, cb, data);
 	if (data.startsWith("staken:")) return handleTakenCallback(env, cb, data);
-	if (data === "scustom") return handleCustomTopicCallback(env, cb);
 	if (data === "mapply") return handleApplyCallback(env, cb);
 
 	// Повторение карточек (текущая карточка — из сессии в D1).

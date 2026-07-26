@@ -58,13 +58,12 @@ export interface MembershipRequest {
 }
 
 /**
- * Шаг диалога: своя тема доклада либо заявка на участие (имя → о себе → фото).
- * Черновик заявки живёт в `data` (JSON) — незаконченная заявка не попадает
- * к админу.
+ * Шаг диалога заявки на участие: имя → о себе → фото. Черновик живёт
+ * в `data` (JSON) — незаконченная заявка не попадает к админу.
  */
 export interface SpeakerDialog {
 	chat_id: number;
-	step: "custom_topic" | "apply_name" | "apply_about" | "apply_photo";
+	step: "apply_name" | "apply_about" | "apply_photo";
 	claim_id: number | null;
 	data: string | null;
 	updated_at: number;

@@ -154,17 +154,21 @@ function freeTopics(topics: PlanTopic[], claims: SpeakerClaim[]): PlanTopic[] {
 	return topics.filter((t) => !taken.has(t.topic.id));
 }
 
+// Темы берут только из плана: своя тема вне плана не предлагается — программа
+// эфиров собирается из глав книги, а не из отдельных заявок.
 function speakerKeyboard(free: PlanTopic[]): InlineKeyboardMarkup {
-	const rows = free.map((t) => [{ text: t.topic.title, callback_data: `sclaim:${t.topic.id}` }]);
-	rows.push([{ text: "💡 Предложить свою тему", callback_data: "scustom" }]);
-	return { inline_keyboard: rows };
+	return {
+		inline_keyboard: free.map((t) => [{ text: t.topic.title, callback_data: `sclaim:${t.topic.id}` }]),
+	};
 }
 
-function speakerIntro(free: PlanTopic[]): string {
+/** Участнику клуба: свободные темы плана или честное «пока нет». */
+export function speakerIntro(free: PlanTopic[]): string {
 	if (free.length === 0) {
 		return (
-			"🎤 Хочешь выступить — отлично!\n\n" +
-			"Свободных тем в плане сейчас нет — предложи свою:"
+			"🎤 <b>Свободных тем сейчас нет</b>\n\n" +
+			"Все темы ближайших эфиров уже разобрали. Как только админ запланирует новый эфир, " +
+			"темы появятся — заходи через /speaker или смотри план в приложении клуба."
 		);
 	}
 	const books = [...new Set(free.map((t) => t.bookTitle))].join(", ");
@@ -192,7 +196,13 @@ export async function handleSpeaker(env: Env, message: TelegramMessage): Promise
 		listSpeakerClaims(env.BOOK_CLUB_DB),
 	]);
 	const free = freeTopics(topics, claims);
-	await sendMessage(env.BOT_TOKEN, message.chat.id, speakerIntro(free), speakerKeyboard(free));
+	// Пустая клавиатура Telegram не примет — при отсутствии тем шлём только текст.
+	await sendMessage(
+		env.BOT_TOKEN,
+		message.chat.id,
+		speakerIntro(free),
+		free.length > 0 ? speakerKeyboard(free) : undefined,
+	);
 }
 
 /** Уведомление админу: только информирование + ссылка на модерацию в CMS. */
@@ -289,12 +299,13 @@ export async function handleClaimCallback(env: Env, cb: TelegramCallbackQuery, d
 	if (!claim) {
 		// Тему заняли между показом клавиатуры и нажатием — обновляем её.
 		const claims = await listSpeakerClaims(env.BOOK_CLUB_DB);
+		const free = freeTopics(topics, claims);
 		await editMessageText(
 			env.BOT_TOKEN,
 			chatId,
 			message.message_id,
-			"Эту тему только что заняли 🙈 Выбери другую:",
-			speakerKeyboard(freeTopics(topics, claims)),
+			free.length > 0 ? "Эту тему только что заняли 🙈 Выбери другую:" : speakerIntro(free),
+			free.length > 0 ? speakerKeyboard(free) : undefined,
 		);
 		await answerCallback(env.BOT_TOKEN, cb.id, "Тему только что заняли");
 		return;
@@ -326,31 +337,7 @@ export async function handleTakenCallback(env: Env, cb: TelegramCallbackQuery, d
 	);
 }
 
-/** Кнопка «Предложить свою тему»: scustom. */
-export async function handleCustomTopicCallback(env: Env, cb: TelegramCallbackQuery): Promise<void> {
-	const message = cb.message;
-	if (!message) {
-		await answerCallback(env.BOT_TOKEN, cb.id);
-		return;
-	}
-	const access = await speakerAccess(env, message.chat.id, cb.from.username);
-	if (!access.registered) {
-		await answerCallback(env.BOT_TOKEN, cb.id, "Нужна заявка на участие");
-		await editMessageText(
-			env.BOT_TOKEN,
-			message.chat.id,
-			message.message_id,
-			membershipPrompt(access.request),
-			applyKeyboard(access.request),
-		);
-		return;
-	}
-	await setDialog(env.BOOK_CLUB_DB, message.chat.id, "custom_topic", null);
-	await answerCallback(env.BOT_TOKEN, cb.id);
-	await sendMessage(env.BOT_TOKEN, message.chat.id, "Напиши тему доклада одним сообщением ✍️");
-}
-
-// ── Диалоги (своя тема; заявка на участие: имя → о себе → фото) ───────────────
+// ── Диалог заявки на участие: имя → о себе → фото ────────────────────────────
 
 /**
  * Сообщение пользователя, когда идёт диалог.
@@ -363,31 +350,6 @@ export async function handleDialogMessage(env: Env, message: TelegramMessage): P
 
 	const text = message.text?.trim();
 	const draft = dialogDraft(dialog);
-
-	if (dialog.step === "custom_topic") {
-		if (!text) return false;
-		const access = await speakerAccess(env, chatId, message.from?.username);
-		if (!access.registered) {
-			await clearDialog(env.BOOK_CLUB_DB, chatId);
-			await sendMessage(env.BOT_TOKEN, chatId, membershipPrompt(access.request), applyKeyboard(access.request));
-			return true;
-		}
-		const claim = await createSpeakerClaim(env.BOOK_CLUB_DB, {
-			topicId: null,
-			topicTitle: text,
-			chatId,
-			username: message.from?.username,
-		});
-		if (!claim) return true;
-
-		await completeClaim(env, claim, access, message.from?.username);
-		await sendMessage(
-			env.BOT_TOKEN,
-			chatId,
-			`Тема «<b>${esc(text)}</b>» записана — заявка ушла админу 🎉 Как подтвердят, напишу!`,
-		);
-		return true;
-	}
 
 	// Заявка на участие: имя.
 	if (dialog.step === "apply_name") {

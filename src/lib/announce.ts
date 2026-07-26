@@ -108,14 +108,33 @@ function bookLine(ctx: AnnounceContext, verb = "Читаем"): string | null {
 	return `${verb} ${title}${authors}`;
 }
 
-/** Задание: свой текст из формы плюс страницы, если они заданы. */
+/**
+ * Что сделать до встречи. Собирается из самой встречи — глава с названием
+ * и страницы уже известны, поэтому руками в CMS ничего не заполняют.
+ * Поле `assignment` в событии, если оно задано, перекрывает шаблон.
+ */
 function assignmentLines(ctx: AnnounceContext): string[] {
 	const { event } = ctx;
-	const parts: string[] = [];
-	if (event.assignment?.trim()) parts.push(esc(event.assignment.trim()));
-	if (event.pages) parts.push(`страницы ${event.pages.from}–${event.pages.to}`);
+	const pages = event.pages ? `страницы ${event.pages.from}–${event.pages.to}` : null;
+
+	if (event.assignment?.trim()) {
+		const parts = [esc(event.assignment.trim()), pages].filter(Boolean);
+		return [`📖 <b>Готовимся:</b> ${parts.join(", ")}`];
+	}
+
+	const chapter = ctx.chapterOrder
+		? ctx.chapterTitle
+			? `прочитать главу ${ctx.chapterOrder} «${esc(ctx.chapterTitle)}»`
+			: `прочитать главу ${ctx.chapterOrder}`
+		: null;
+	const parts = [chapter, pages].filter(Boolean);
 	if (parts.length === 0) return [];
-	return [`📖 <b>Задание:</b> ${parts.join(", ")}`];
+
+	const tail =
+		event.type === "live-talk"
+			? "на эфире её разбирают докладчики"
+			: "на созвоне разбираем её вместе";
+	return [`📖 <b>Готовимся:</b> ${parts.join(", ")} — ${tail}`];
 }
 
 /** «🔴 Глава 1 — Восход AI-инженерии — @kunjutone». */
@@ -169,11 +188,8 @@ export function renderAnnounce(ctx: AnnounceContext): string {
 		bookLine(ctx),
 		`🗓 ${formatWhen(event.date, event.time)}`,
 		assignmentLines(ctx),
-		event.type === "live-talk"
-			? topicLines(ctx)
-			: ctx.chapterTitle
-				? [`📕 Разбираем главу ${ctx.chapterOrder} — ${esc(ctx.chapterTitle)}`]
-				: [],
+		// У «докладов» — программа тем; у обсуждения главу уже назвало задание.
+		event.type === "live-talk" ? topicLines(ctx) : [],
 		moderators.length > 0 ? `🎙 Ведут: ${esc(moderators.join(", "))}` : null,
 		linkLines(ctx),
 	]);

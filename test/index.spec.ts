@@ -473,7 +473,6 @@ describe("Посты о встрече в группу клуба", () => {
 		stream: 114,
 		book_id: "ai-engineering",
 		chapter: "01-osnovy",
-		assignment: "прочитать главу 1",
 		streams: { youtube: "https://youtu.be/x", vk: "https://vkvideo.ru/y" },
 	};
 
@@ -499,7 +498,9 @@ describe("Посты о встрече в группу клуба", () => {
 		expect(text).toContain("Пятница, 24 июля, в 18:00 МСК");
 		expect(text).toContain("AI-инженерия");
 		expect(text).toContain("Чип Хьюен");
-		expect(text).toContain("Задание:</b> прочитать главу 1");
+		// Задание собирается само: главу и её название бот знает из данных.
+		expect(text).toContain("Готовимся:</b> прочитать главу 1 «Основы создания AI-приложений»");
+		expect(text).toContain("на эфире её разбирают докладчики");
 		expect(text).toContain("🔴 Глава 1 — Восход AI-инженерии — @kunjutone");
 		// Тема без заявки не выпадает из программы, а помечается свободной.
 		expect(text).toContain("🔴 Глава 1 — Планирование AI-приложений — свободно");
@@ -522,21 +523,33 @@ describe("Посты о встрече в группу клуба", () => {
 		expect(text).not.toContain("Восход AI-инженерии");
 	});
 
-	it("страницы обсуждения попадают в задание", () => {
+	it("обсуждение: задание из главы и страниц, без ручного текста", () => {
 		const text = renderAnnounce({
 			...ctx,
 			event: {
 				...talkEvent,
 				type: "closed-chapter",
-				assignment: "",
 				pages: { from: 12, to: 48 },
 				call_url: "https://meet.google.com/abc",
 			},
 			topics: [],
 		});
-		expect(text).toContain("страницы 12–48");
+		expect(text).toContain(
+			"Готовимся:</b> прочитать главу 1 «Основы создания AI-приложений», страницы 12–48",
+		);
+		expect(text).toContain("на созвоне разбираем её вместе");
 		expect(text).toContain("Google Meet");
-		expect(text).toContain("Разбираем главу 1 — Основы создания AI-приложений");
+		// Строка «Разбираем главу…» ушла: главу уже назвало задание.
+		expect(text).not.toContain("📕");
+	});
+
+	it("явный assignment перекрывает шаблон", () => {
+		const text = renderAnnounce({
+			...ctx,
+			event: { ...talkEvent, assignment: "посмотреть доклад про RAG", pages: { from: 5, to: 9 } },
+		});
+		expect(text).toContain("Готовимся:</b> посмотреть доклад про RAG, страницы 5–9");
+		expect(text).not.toContain("прочитать главу");
 	});
 
 	it("HTML в названиях экранируется (parse_mode=HTML)", () => {

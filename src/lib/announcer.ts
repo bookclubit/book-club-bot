@@ -22,8 +22,11 @@ import { bookPageUrl } from "./urls";
 import {
 	getPostDraft,
 	listAnnounceChats,
+	listDuePostDrafts,
 	listSpeakerClaims,
+	markPostDraftFailed,
 	markPostDraftSent,
+	setPostDraftHasPoster,
 	setPostDraftPoster,
 	setPostDraftText,
 	upsertPostDraft,
@@ -129,6 +132,52 @@ async function takePoster(env: Env, eventId: string, kind: string): Promise<Uint
 }
 
 /**
+ * Меняет афишу у отдельного поста (из раздела «Посты» в CMS): картинку можно
+ * загрузить любому посту, включая напоминание, и заменить уже загруженную.
+ * `bytes = null` — убрать афишу совсем.
+ */
+export async function setDraftPoster(
+	env: Env,
+	id: number,
+	bytes: Uint8Array | null,
+): Promise<PostDraft | null> {
+	const draft = await getPostDraft(env.BOOK_CLUB_DB, id);
+	if (!draft || draft.status === "sent") return null;
+
+	if (bytes) {
+		await stashPoster(env, draft.event_id, draft.kind, bytes);
+	} else {
+		await env.BOOK_CLUB_KV.delete(posterKey(draft.event_id, draft.kind));
+	}
+	// has_poster и сброс file_id — одной операцией: старое изображение Telegram
+	// иначе переиспользовал бы вместо нового.
+	return setPostDraftHasPoster(env.BOOK_CLUB_DB, id, Boolean(bytes));
+}
+
+/**
+ * Афиша поста для превью в CMS: сначала загруженная (KV), иначе — файл из
+ * Telegram по `file_id` (пост уже публиковали). У напоминания своей может не
+ * быть — тогда показываем афишу дня, ту же, что уйдёт при публикации.
+ */
+export async function getDraftPoster(
+	env: Env,
+	draft: PostDraft,
+): Promise<{ bytes: Uint8Array } | { fileId: string } | null> {
+	const own = await takePoster(env, draft.event_id, draft.kind);
+	if (own) return { bytes: own };
+	if (draft.poster_file_id) return { fileId: draft.poster_file_id };
+	if (draft.kind === "soon") {
+		const day = await getDraftByKind(env, draft.event_id, "day");
+		if (day) {
+			const dayBytes = await takePoster(env, day.event_id, day.kind);
+			if (dayBytes) return { bytes: dayBytes };
+			if (day.poster_file_id) return { fileId: day.poster_file_id };
+		}
+	}
+	return null;
+}
+
+/**
  * Готовит (или обновляет) черновики трёх постов о встрече. Ничего не публикует:
  * тексты ждут админа в CMS. Афиши складываем в KV — при публикации бот отправит
  * их файлом и дальше будет переиспользовать полученный file_id.
@@ -147,13 +196,17 @@ export async function prepareDrafts(
 
 	let count = 0;
 	for (const kind of POST_KINDS) {
+		const fresh = kind === "announce" ? posters.announce : kind === "day" ? posters.day : undefined;
 		const draft = await upsertPostDraft(env.BOOK_CLUB_DB, {
 			eventId: event.id,
 			kind,
 			event: snapshot,
 			text: renderAnnouncement(kind, ctx),
-			hasPoster: kind === "announce" ? Boolean(posters.announce) : kind === "day" ? Boolean(posters.day) : false,
+			hasPoster: Boolean(fresh),
 		});
+		// Новая афиша обязана вытеснить старый file_id, иначе Telegram отправит
+		// прежнюю картинку — файл он берёт по id, а не из KV.
+		if (draft && fresh) await setPostDraftPoster(env.BOOK_CLUB_DB, draft.id, null);
 		if (draft) count++;
 	}
 	return { drafts: count };
@@ -250,6 +303,55 @@ export async function publishDraft(
 		if (fileId) await env.BOOK_CLUB_KV.delete(posterKey(draft.event_id, draft.kind));
 	}
 	return { sentTo, errors };
+}
+
+/**
+ * Публикация одобренных постов, которым пришло время (cron каждые 5 минут).
+ * Одобрение обязательно: расписание — это «опубликуй за меня то, что я уже
+ * прочитал», а не автопостинг. Неудачи считаем, чтобы упавший пост не долбил
+ * группу каждые 5 минут: после MAX_PUBLISH_ATTEMPTS попыток он ждёт админа.
+ */
+export async function runScheduledPosts(env: Env, now = Date.now()): Promise<{ sent: number }> {
+	const due = await listDuePostDrafts(env.BOOK_CLUB_DB, now);
+	let sent = 0;
+	for (const draft of due) {
+		const chatIds = draft.scheduled_chats
+			? (JSON.parse(draft.scheduled_chats) as number[])
+			: undefined;
+		try {
+			const result = await publishDraft(env, draft.id, chatIds);
+			if (result.sentTo.length > 0) {
+				sent++;
+				if (result.errors.length > 0) {
+					console.warn(`Пост ${draft.id} ушёл частично:`, result.errors.join("; "));
+				}
+			} else {
+				await markPostDraftFailed(env.BOOK_CLUB_DB, draft.id, result.errors.join("; "));
+			}
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			console.error(`Автопубликация поста ${draft.id} не удалась:`, err);
+			await markPostDraftFailed(env.BOOK_CLUB_DB, draft.id, message);
+		}
+	}
+	return { sent };
+}
+
+/**
+ * Когда такой пост обычно публикуют — конкретным временем, чтобы CMS могла
+ * подставить его в поле расписания. Анонс — сразу (ближайший тик cron), афиша
+ * дня — утром в день встречи, напоминание — за 10 минут до начала.
+ */
+export function suggestedPublishAt(
+	kind: AnnounceKind,
+	event: { date: string; time: string },
+	now = Date.now(),
+): number | null {
+	const start = Date.parse(`${event.date}T${event.time}:00+03:00`);
+	if (!Number.isFinite(start)) return null;
+	if (kind === "announce") return now;
+	if (kind === "day") return Date.parse(`${event.date}T10:00:00+03:00`);
+	return start - 10 * 60 * 1000;
 }
 
 /** Черновик встречи по виду поста (нужен напоминанию, чтобы взять афишу дня). */

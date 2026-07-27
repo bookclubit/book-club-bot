@@ -27,6 +27,7 @@ import {
 	getClaimByTopic,
 	getDailyCards,
 	getMembershipRequestById,
+	getPostDraft,
 	getSpeakerClaim,
 	getUser,
 	listAnnounceChats,
@@ -35,6 +36,7 @@ import {
 	listRegistrations,
 	listSpeakerClaims,
 	markReminderSent,
+	MAX_PUBLISH_ATTEMPTS,
 	releaseClaimByTopic,
 	removeAnnounceChat,
 	saveCardProgress,
@@ -42,6 +44,8 @@ import {
 	setClaimSlides,
 	setDailyCards,
 	setMembershipStatus,
+	setPostDraftApproved,
+	setPostDraftSchedule,
 	setPostDraftText,
 	updateSpeakerClaim,
 	upsertUser,
@@ -49,7 +53,16 @@ import {
 } from "./lib/db";
 import { speakerAccess } from "./lib/members";
 import { fetchPlanTopics } from "./lib/plan";
-import { NoAnnounceChats, prepareDrafts, publishDraft, refreshDraft } from "./lib/announcer";
+import {
+	getDraftPoster,
+	NoAnnounceChats,
+	prepareDrafts,
+	publishDraft,
+	refreshDraft,
+	runScheduledPosts,
+	setDraftPoster,
+	suggestedPublishAt,
+} from "./lib/announcer";
 import { KIND_INFO, type AnnounceEvent } from "./lib/announce";
 import { miniappUrl } from "./lib/urls";
 import type { AnnounceKind } from "./types";
@@ -547,25 +560,66 @@ async function handleAdminPosts(env: Env): Promise<Response> {
 		listAnnounceChats(env.BOOK_CLUB_DB),
 	]);
 	return json({
-		posts: posts.map((p) => ({
-			id: p.id,
-			event_id: p.event_id,
-			kind: p.kind,
-			kind_title: KIND_INFO[p.kind as AnnounceKind]?.title ?? p.kind,
-			kind_when: KIND_INFO[p.kind as AnnounceKind]?.when ?? "",
-			// Заголовок и дата встречи — чтобы CMS не разбирала снимок сама.
-			event_title: safeEventField(p.event, "title"),
-			event_date: safeEventField(p.event, "date"),
-			event_time: safeEventField(p.event, "time"),
-			text: p.text,
-			edited: p.edited === 1,
-			has_poster: p.has_poster === 1 || Boolean(p.poster_file_id),
-			status: p.status,
-			sent_at: p.sent_at,
-			sent_to: p.sent_to ? (JSON.parse(p.sent_to) as unknown) : null,
-			updated_at: p.updated_at,
-		})),
+		posts: posts.map((p) => {
+			const date = safeEventField(p.event, "date");
+			const time = safeEventField(p.event, "time");
+			return {
+				id: p.id,
+				event_id: p.event_id,
+				kind: p.kind,
+				kind_title: KIND_INFO[p.kind as AnnounceKind]?.title ?? p.kind,
+				kind_when: KIND_INFO[p.kind as AnnounceKind]?.when ?? "",
+				// Заголовок и дата встречи — чтобы CMS не разбирала снимок сама.
+				event_title: safeEventField(p.event, "title"),
+				event_date: date,
+				event_time: time,
+				text: p.text,
+				edited: p.edited === 1,
+				has_poster: p.has_poster === 1 || Boolean(p.poster_file_id),
+				status: p.status,
+				approved_at: p.approved_at,
+				scheduled_at: p.scheduled_at,
+				scheduled_chats: p.scheduled_chats ? (JSON.parse(p.scheduled_chats) as number[]) : null,
+				attempts: p.attempts,
+				publish_error: p.publish_error,
+				// Время, которое CMS подставит в поле расписания.
+				suggested_at:
+					date && time
+						? suggestedPublishAt(p.kind as AnnounceKind, { date, time })
+						: null,
+				sent_at: p.sent_at,
+				sent_to: p.sent_to ? (JSON.parse(p.sent_to) as unknown) : null,
+				updated_at: p.updated_at,
+			};
+		}),
 		chats,
+		max_attempts: MAX_PUBLISH_ATTEMPTS,
+	});
+}
+
+/**
+ * Афиша поста для превью в CMS: GET /api/admin/posts/poster?id=<id>.
+ * Отдаём загруженную картинку из KV или файл из Telegram по file_id.
+ */
+async function handleAdminPostPoster(env: Env, url: URL): Promise<Response> {
+	const id = Number(url.searchParams.get("id"));
+	if (!Number.isFinite(id) || id <= 0) return json({ error: "нужен id черновика" }, 400);
+
+	const draft = await getPostDraft(env.BOOK_CLUB_DB, id);
+	if (!draft) return json({ error: "черновик не найден" }, 404);
+
+	const poster = await getDraftPoster(env, draft);
+	if (!poster) return json({ error: "у поста нет афиши" }, 404);
+
+	if ("bytes" in poster) {
+		return new Response(poster.bytes as unknown as BodyInit, {
+			headers: { "content-type": "image/jpeg", ...CORS_HEADERS },
+		});
+	}
+	const file = await getFileResponse(env.BOT_TOKEN, poster.fileId);
+	if (!file) return json({ error: "не удалось получить файл из Telegram" }, 502);
+	return new Response(file.body, {
+		headers: { "content-type": "image/jpeg", ...CORS_HEADERS },
 	});
 }
 
@@ -582,13 +636,24 @@ function safeEventField(snapshot: string, field: string): string | null {
 
 /**
  * Управление постами из CMS: POST /api/admin/posts.
- *   { action: "publish", id, chat_ids? } — опубликовать (по умолчанию во все группы)
- *   { action: "text", id, text }         — сохранить правку текста
- *   { action: "refresh", id }            — пересобрать текст из данных клуба
- *   { action: "delete", id }             — убрать черновик
+ *   { action: "publish", id, chat_ids? }    — опубликовать сейчас (по умолчанию во все группы)
+ *   { action: "text", id, text }            — сохранить правку текста
+ *   { action: "refresh", id }               — пересобрать текст из данных клуба
+ *   { action: "approve", id, approved }     — одобрить текст (или снять одобрение)
+ *   { action: "schedule", id, at, chat_ids? } — время автопубликации; at: null — снять
+ *   { action: "poster", id, poster? }       — заменить афишу (без poster — убрать)
+ *   { action: "delete", id }                — убрать черновик
  */
 async function handleAdminPostAction(env: Env, request: Request): Promise<Response> {
-	let body: { action?: string; id?: number; text?: string; chat_ids?: number[] };
+	let body: {
+		action?: string;
+		id?: number;
+		text?: string;
+		chat_ids?: number[];
+		approved?: boolean;
+		at?: number | null;
+		poster?: string | null;
+	};
 	try {
 		body = (await request.json()) as typeof body;
 	} catch {
@@ -596,6 +661,34 @@ async function handleAdminPostAction(env: Env, request: Request): Promise<Respon
 	}
 	const id = Number(body.id);
 	if (!Number.isFinite(id) || id <= 0) return json({ error: "нужен id черновика" }, 400);
+
+	if (body.action === "approve") {
+		const draft = await setPostDraftApproved(env.BOOK_CLUB_DB, id, body.approved !== false);
+		if (!draft) return json({ error: "черновик не найден или уже опубликован" }, 404);
+		return json({ ok: true, approved_at: draft.approved_at, scheduled_at: draft.scheduled_at });
+	}
+
+	if (body.action === "schedule") {
+		const at = body.at === null || body.at === undefined ? null : Number(body.at);
+		if (at !== null && !Number.isFinite(at)) {
+			return json({ error: "at — время в epoch ms или null" }, 400);
+		}
+		const draft = await setPostDraftSchedule(env.BOOK_CLUB_DB, id, at, body.chat_ids);
+		if (!draft) {
+			return json(
+				{ error: "черновик не найден, уже опубликован или ещё не одобрен" },
+				404,
+			);
+		}
+		return json({ ok: true, scheduled_at: draft.scheduled_at });
+	}
+
+	if (body.action === "poster") {
+		const bytes = decodePoster(body.poster) ?? null;
+		const draft = await setDraftPoster(env, id, bytes);
+		if (!draft) return json({ error: "черновик не найден или уже опубликован" }, 404);
+		return json({ ok: true, has_poster: draft.has_poster === 1 });
+	}
 
 	if (body.action === "text") {
 		const text = (body.text ?? "").trim();
@@ -631,7 +724,10 @@ async function handleAdminPostAction(env: Env, request: Request): Promise<Respon
 		}
 	}
 
-	return json({ error: "action: publish | text | refresh | delete" }, 400);
+	return json(
+		{ error: "action: publish | text | refresh | approve | schedule | poster | delete" },
+		400,
+	);
 }
 
 // ── Участие в клубе: заявки и брони тем (для miniapp и CMS) ───────────────────
@@ -982,6 +1078,9 @@ async function routeApi(env: Env, request: Request, url: URL): Promise<Response>
 		if (url.pathname === "/api/admin/posts" && request.method === "GET") {
 			return handleAdminPosts(env);
 		}
+		if (url.pathname === "/api/admin/posts/poster" && request.method === "GET") {
+			return handleAdminPostPoster(env, url);
+		}
 		if (url.pathname === "/api/admin/posts" && request.method === "POST") {
 			return handleAdminPostAction(env, request);
 		}
@@ -1148,11 +1247,16 @@ export default {
 			);
 			return;
 		}
-		// Каждые 5 минут: «встреча началась» тем, кто записался. Посты в группы
-		// по расписанию не выходят — их публикует админ из CMS.
+		// Каждые 5 минут: «встреча началась» тем, кто записался, и посты, которым
+		// админ одобрил текст и поставил время. Без одобрения ничего не уходит.
 		ctx.waitUntil(
 			runTimedReminders(env).catch((err) =>
 				console.error("Ошибка напоминаний о встречах:", err),
+			),
+		);
+		ctx.waitUntil(
+			runScheduledPosts(env).catch((err) =>
+				console.error("Ошибка публикации постов по расписанию:", err),
 			),
 		);
 	},

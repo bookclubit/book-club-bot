@@ -13,7 +13,15 @@ import {
 } from "../src/lib/spaced-repetition";
 import { eventDateFromPath, eventPathById } from "../src/lib/events";
 import { buildTopics, renderAnnounce, renderDay, renderSoon } from "../src/lib/announce";
-import { prepareDrafts, publishDraft, refreshDraft } from "../src/lib/announcer";
+import {
+	getDraftPoster,
+	prepareDrafts,
+	publishDraft,
+	refreshDraft,
+	runScheduledPosts,
+	setDraftPoster,
+	suggestedPublishAt,
+} from "../src/lib/announcer";
 import { findSpeakerByUsername, telegramHandle } from "../src/lib/speakers";
 import {
 	addAnnounceChat,
@@ -26,8 +34,10 @@ import {
 	getSpeakerProfile,
 	listAnnounceChats,
 	listMembershipRequests,
+	listDuePostDrafts,
 	listPostDrafts,
 	listSpeakerClaims,
+	MAX_PUBLISH_ATTEMPTS,
 	releaseClaimByTopic,
 	removeAnnounceChat,
 	resetSchemaCacheForTests,
@@ -36,6 +46,9 @@ import {
 	setBotSetting,
 	setClaimSlides,
 	setMembershipStatus,
+	setPostDraftApproved,
+	setPostDraftPoster,
+	setPostDraftSchedule,
 	setPostDraftText,
 	type MembershipRequest,
 } from "../src/lib/db";
@@ -713,6 +726,105 @@ describe("Посты о встрече в группу клуба", () => {
 		await setBotSetting(db, ANNOUNCE_CHAT_KEY, "-1002793252927");
 		const chats = await listAnnounceChats(db);
 		expect(chats.map((c) => c.chat_id)).toEqual([-1002793252927]);
+	});
+
+	it("расписание ставится только одобренному посту", async () => {
+		resetSchemaCacheForTests();
+		const db = env.BOOK_CLUB_DB;
+		await prepareDrafts(env, draftEvent, {});
+		const draft = (await listPostDrafts(db)).find((d) => d.kind === "announce")!;
+		const at = Date.parse("2026-07-24T15:00:00+03:00");
+
+		// Без одобрения расписание не принимается: иначе это автопостинг.
+		expect(await setPostDraftSchedule(db, draft.id, at)).toBeNull();
+
+		expect((await setPostDraftApproved(db, draft.id, true))?.approved_at).toBeTruthy();
+		expect((await setPostDraftSchedule(db, draft.id, at))?.scheduled_at).toBe(at);
+
+		// Забрали пост на доработку — расписание снимается вместе с одобрением.
+		const unapproved = await setPostDraftApproved(db, draft.id, false);
+		expect(unapproved?.approved_at).toBeNull();
+		expect(unapproved?.scheduled_at).toBeNull();
+	});
+
+	it("повторная подготовка встречи снимает одобрение неправленого текста", async () => {
+		resetSchemaCacheForTests();
+		const db = env.BOOK_CLUB_DB;
+		await prepareDrafts(env, draftEvent, {});
+		const [auto, manual] = await listPostDrafts(db);
+
+		await setPostDraftApproved(db, auto.id, true);
+		await setPostDraftText(db, manual.id, "Текст админа");
+		await setPostDraftApproved(db, manual.id, true);
+
+		await prepareDrafts(env, draftEvent, {});
+		// Текст переписан заново — одобрение прошлого текста больше не в счёт.
+		expect((await getPostDraft(db, auto.id))?.approved_at).toBeNull();
+		// Ручной текст остался, значит и одобрение к нему всё ещё относится.
+		expect((await getPostDraft(db, manual.id))?.approved_at).toBeTruthy();
+	});
+
+	it("cron публикует только одобренные и только по времени, ошибки не долбят группу", async () => {
+		resetSchemaCacheForTests();
+		const db = env.BOOK_CLUB_DB;
+		await prepareDrafts(env, draftEvent, {});
+		const all = await listPostDrafts(db);
+		const now = Date.parse("2026-07-24T12:00:00+03:00");
+		const [due, future, unapproved] = all;
+
+		await setPostDraftApproved(db, due.id, true);
+		await setPostDraftSchedule(db, due.id, now - 60_000);
+		await setPostDraftApproved(db, future.id, true);
+		await setPostDraftSchedule(db, future.id, now + 3600_000);
+		// Третьему поставим время в прошлом, но одобрения у него нет.
+		await setPostDraftSchedule(db, unapproved.id, now - 60_000);
+
+		expect((await listDuePostDrafts(db, now)).map((d) => d.id)).toEqual([due.id]);
+
+		// Групп нет — публикация падает; попытка считается, причина видна в CMS.
+		await runScheduledPosts(env, now);
+		const afterFirst = await getPostDraft(db, due.id);
+		expect(afterFirst?.status).toBe("pending");
+		expect(afterFirst?.attempts).toBe(1);
+		expect(afterFirst?.publish_error).toMatch(/anons_here/);
+
+		for (let i = 1; i < MAX_PUBLISH_ATTEMPTS; i++) await runScheduledPosts(env, now);
+		expect((await getPostDraft(db, due.id))?.attempts).toBe(MAX_PUBLISH_ATTEMPTS);
+		// Исчерпал попытки — cron его больше не берёт, ждёт админа.
+		expect(await listDuePostDrafts(db, now)).toEqual([]);
+	});
+
+	it("афишу можно добавить любому посту, включая напоминание, и заменить", async () => {
+		resetSchemaCacheForTests();
+		const db = env.BOOK_CLUB_DB;
+		await prepareDrafts(env, draftEvent, {});
+		const soon = (await listPostDrafts(db)).find((d) => d.kind === "soon")!;
+		expect(soon.has_poster).toBe(0);
+
+		const first = new Uint8Array([1, 2, 3]);
+		expect((await setDraftPoster(env, soon.id, first))?.has_poster).toBe(1);
+		expect(await getDraftPoster(env, (await getPostDraft(db, soon.id))!)).toEqual({
+			bytes: first,
+		});
+
+		// Пост уже публиковали, у него есть file_id: новая картинка обязана его
+		// сбросить, иначе Telegram отправит прежнюю.
+		await setPostDraftPoster(db, soon.id, "file-123");
+		const replaced = await setDraftPoster(env, soon.id, new Uint8Array([9]));
+		expect(replaced?.poster_file_id).toBeNull();
+		expect(replaced?.has_poster).toBe(1);
+
+		const removed = await setDraftPoster(env, soon.id, null);
+		expect(removed?.has_poster).toBe(0);
+		expect(await getDraftPoster(env, removed!)).toBeNull();
+	});
+
+	it("подсказка времени: афиша утром, напоминание за 10 минут до начала", () => {
+		const event = { date: "2026-07-24", time: "18:00" };
+		expect(suggestedPublishAt("day", event)).toBe(Date.parse("2026-07-24T10:00:00+03:00"));
+		expect(suggestedPublishAt("soon", event)).toBe(Date.parse("2026-07-24T17:50:00+03:00"));
+		// Анонс публикуют сразу — подсказка равна «сейчас».
+		expect(suggestedPublishAt("announce", event, 1_000)).toBe(1_000);
 	});
 })
 

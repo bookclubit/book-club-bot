@@ -189,9 +189,10 @@ const SCHEMA = [
 		title TEXT,
 		added_at INTEGER NOT NULL
 	)`,
-	// Черновики постов о встрече. Расписания нет: бот готовит текст, публикует
-	// админ из CMS и сам выбирает группы. Поля встречи храним снимком (event
-	// JSON) — в момент подготовки встреча ещё в открытом PR.
+	// Черновики постов о встрече. Бот готовит текст, админ его одобряет в CMS и
+	// либо публикует сразу, либо ставит время — тогда пост уйдёт по cron. Поля
+	// встречи храним снимком (event JSON): в момент подготовки встреча ещё в PR.
+	// Автопубликация возможна только у одобренных постов (approved_at).
 	`CREATE TABLE IF NOT EXISTS post_drafts (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		event_id TEXT NOT NULL,
@@ -202,6 +203,11 @@ const SCHEMA = [
 		has_poster INTEGER NOT NULL DEFAULT 0,
 		poster_file_id TEXT,
 		status TEXT NOT NULL DEFAULT 'pending',
+		approved_at INTEGER,
+		scheduled_at INTEGER,
+		scheduled_chats TEXT,
+		attempts INTEGER NOT NULL DEFAULT 0,
+		publish_error TEXT,
 		sent_at INTEGER,
 		sent_to TEXT,
 		created_at INTEGER NOT NULL,
@@ -236,6 +242,32 @@ const MIGRATIONS: { table: string; column: string; sql: string }[] = [
 		table: "speaker_dialog",
 		column: "data",
 		sql: "ALTER TABLE speaker_dialog ADD COLUMN data TEXT",
+	},
+	// Одобрение и расписание постов: у уже созданных черновиков этих полей нет.
+	{
+		table: "post_drafts",
+		column: "approved_at",
+		sql: "ALTER TABLE post_drafts ADD COLUMN approved_at INTEGER",
+	},
+	{
+		table: "post_drafts",
+		column: "scheduled_at",
+		sql: "ALTER TABLE post_drafts ADD COLUMN scheduled_at INTEGER",
+	},
+	{
+		table: "post_drafts",
+		column: "scheduled_chats",
+		sql: "ALTER TABLE post_drafts ADD COLUMN scheduled_chats TEXT",
+	},
+	{
+		table: "post_drafts",
+		column: "attempts",
+		sql: "ALTER TABLE post_drafts ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+	},
+	{
+		table: "post_drafts",
+		column: "publish_error",
+		sql: "ALTER TABLE post_drafts ADD COLUMN publish_error TEXT",
 	},
 ];
 
@@ -932,6 +964,16 @@ export interface PostDraft {
 	has_poster: number;
 	poster_file_id: string | null;
 	status: "pending" | "sent";
+	/** Админ подтвердил текст. Без этого пост не уйдёт по расписанию. */
+	approved_at: number | null;
+	/** Когда публиковать (epoch ms). null — только вручную из CMS. */
+	scheduled_at: number | null;
+	/** JSON [chat_id] для автопубликации; null — во все подключённые группы. */
+	scheduled_chats: string | null;
+	/** Сколько раз cron уже пытался опубликовать (защита от вечных повторов). */
+	attempts: number;
+	/** Почему не ушло в последний раз — показываем в CMS. */
+	publish_error: string | null;
 	sent_at: number | null;
 	/** JSON [{chat_id, message_id}] — куда пост уже ушёл. */
 	sent_to: string | null;
@@ -939,10 +981,16 @@ export interface PostDraft {
 	updated_at: number;
 }
 
+/** Сколько раз cron пробует опубликовать пост, прежде чем сдаться. */
+export const MAX_PUBLISH_ATTEMPTS = 3;
+
 /**
  * Создаёт черновик или обновляет его под новые поля встречи. Текст, который
  * правили руками (`edited = 1`), не затирается: правка встречи в CMS не должна
  * молча выбрасывать формулировки админа. Уже отправленный пост не меняем.
+ *
+ * Если текст переписан заново, одобрение и расписание сбрасываются: админ
+ * одобрял другой текст, и публиковать по старому расписанию новый — обман.
  */
 export async function upsertPostDraft(
 	db: D1Database,
@@ -966,11 +1014,96 @@ export async function upsertPostDraft(
 					WHEN post_drafts.edited = 1 OR post_drafts.status = 'sent' THEN post_drafts.text
 					ELSE excluded.text END,
 				has_poster = CASE WHEN excluded.has_poster = 1 THEN 1 ELSE post_drafts.has_poster END,
+				approved_at = CASE
+					WHEN post_drafts.edited = 1 OR post_drafts.status = 'sent' THEN post_drafts.approved_at
+					ELSE NULL END,
+				scheduled_at = CASE
+					WHEN post_drafts.edited = 1 OR post_drafts.status = 'sent' THEN post_drafts.scheduled_at
+					ELSE NULL END,
 				updated_at = excluded.updated_at
 			 RETURNING *`,
 		)
 		.bind(draft.eventId, draft.kind, draft.event, draft.text, draft.hasPoster ? 1 : 0, now, now)
 		.first<PostDraft>();
+}
+
+/**
+ * Одобрение текста админом. Снятие одобрения (`false`) заодно снимает
+ * расписание: иначе пост уйдёт сам, хотя админ его уже забрал на доработку.
+ */
+export async function setPostDraftApproved(
+	db: D1Database,
+	id: number,
+	approved: boolean,
+): Promise<PostDraft | null> {
+	await ensureSchema(db);
+	const now = Date.now();
+	return db
+		.prepare(
+			approved
+				? `UPDATE post_drafts SET approved_at = ?, publish_error = NULL, attempts = 0, updated_at = ?
+					 WHERE id = ? AND status = 'pending' RETURNING *`
+				: `UPDATE post_drafts SET approved_at = NULL, scheduled_at = NULL, updated_at = ?
+					 WHERE id = ? AND status = 'pending' RETURNING *`,
+		)
+		.bind(...(approved ? [now, now, id] : [now, id]))
+		.first<PostDraft>();
+}
+
+/**
+ * Ставит (или снимает, если `at = null`) время автопубликации. Только для
+ * одобренных постов — расписание без одобрения было бы той самой автоматикой,
+ * от которой мы ушли.
+ */
+export async function setPostDraftSchedule(
+	db: D1Database,
+	id: number,
+	at: number | null,
+	chatIds?: number[] | null,
+): Promise<PostDraft | null> {
+	await ensureSchema(db);
+	const now = Date.now();
+	return db
+		.prepare(
+			`UPDATE post_drafts
+			 SET scheduled_at = ?, scheduled_chats = ?, attempts = 0, publish_error = NULL, updated_at = ?
+			 WHERE id = ? AND status = 'pending' AND (? IS NULL OR approved_at IS NOT NULL)
+			 RETURNING *`,
+		)
+		.bind(at, chatIds && chatIds.length > 0 ? JSON.stringify(chatIds) : null, now, id, at)
+		.first<PostDraft>();
+}
+
+/** Одобренные посты, которым пора уходить (для cron). */
+export async function listDuePostDrafts(db: D1Database, now = Date.now()): Promise<PostDraft[]> {
+	await ensureSchema(db);
+	const { results } = await db
+		.prepare(
+			`SELECT * FROM post_drafts
+			 WHERE status = 'pending' AND approved_at IS NOT NULL
+			   AND scheduled_at IS NOT NULL AND scheduled_at <= ?
+			   AND attempts < ?
+			 ORDER BY scheduled_at`,
+		)
+		.bind(now, MAX_PUBLISH_ATTEMPTS)
+		.all<PostDraft>();
+	return results ?? [];
+}
+
+/** Неудачная попытка автопубликации: считаем и запоминаем причину. */
+export async function markPostDraftFailed(
+	db: D1Database,
+	id: number,
+	error: string,
+): Promise<void> {
+	await ensureSchema(db);
+	await db
+		.prepare(
+			`UPDATE post_drafts SET attempts = attempts + 1, publish_error = ?, updated_at = ?
+			 WHERE id = ?`,
+		)
+		.bind(error.slice(0, 500), Date.now(), id)
+		.run();
 }
 
 export async function listPostDrafts(db: D1Database): Promise<PostDraft[]> {
@@ -1006,16 +1139,36 @@ export async function setPostDraftText(
 		.first<PostDraft>();
 }
 
+/** Запоминает file_id загруженной афиши (null — забыть: картинка сменилась). */
 export async function setPostDraftPoster(
 	db: D1Database,
 	id: number,
-	fileId: string,
+	fileId: string | null,
 ): Promise<void> {
 	await ensureSchema(db);
 	await db
 		.prepare("UPDATE post_drafts SET poster_file_id = ?, updated_at = ? WHERE id = ?")
 		.bind(fileId, Date.now(), id)
 		.run();
+}
+
+/**
+ * Афиша у поста появилась или её убрали. Новая картинка всегда сбрасывает
+ * `poster_file_id`: иначе Telegram переиспользовал бы старое изображение.
+ */
+export async function setPostDraftHasPoster(
+	db: D1Database,
+	id: number,
+	hasPoster: boolean,
+): Promise<PostDraft | null> {
+	await ensureSchema(db);
+	return db
+		.prepare(
+			`UPDATE post_drafts SET has_poster = ?, poster_file_id = NULL, updated_at = ?
+			 WHERE id = ? AND status = 'pending' RETURNING *`,
+		)
+		.bind(hasPoster ? 1 : 0, Date.now(), id)
+		.first<PostDraft>();
 }
 
 /** Отмечает пост опубликованным и запоминает, в какие чаты он ушёл. */
@@ -1028,7 +1181,8 @@ export async function markPostDraftSent(
 	const now = Date.now();
 	return db
 		.prepare(
-			`UPDATE post_drafts SET status = 'sent', sent_at = ?, sent_to = ?, updated_at = ?
+			`UPDATE post_drafts
+			 SET status = 'sent', sent_at = ?, sent_to = ?, publish_error = NULL, updated_at = ?
 			 WHERE id = ? RETURNING *`,
 		)
 		.bind(now, JSON.stringify(sentTo), now, id)

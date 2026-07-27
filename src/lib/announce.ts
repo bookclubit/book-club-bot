@@ -5,7 +5,12 @@
 // что в book-club-data встреча появится только после мержа PR), книга и темы
 // главы из book-club-data и спикеры из заявок в D1. Поэтому дневной пост уже
 // знает спикеров, которых подтвердили после анонса.
+//
+// Без эмодзи: структуру держат жирные подзаголовки, пустые строки и ссылки.
+// Всё, что называет человека или ресурс, — ссылка: спикеры и ведущие ведут в
+// Telegram, книга — на страницу издателя (или на книгу в приложении клуба).
 
+import { telegramHandle } from "./speakers";
 import type { AnnounceKind, ClubEvent, TopicRef } from "../types";
 
 /** Поля встречи, которых достаточно для постов (совпадают со схемой events/*.json). */
@@ -25,14 +30,16 @@ export interface AnnounceEvent {
 	call_url?: string;
 	notes_board_url?: string;
 	materials?: { title: string; url: string }[];
-	moderators?: { name: string }[];
+	moderators?: { name: string; speaker_id?: string }[];
 }
 
-/** Тема главы для поста: спикер — @username из заявки, если она подтверждена. */
+/** Тема главы для поста: спикер из подтверждённой заявки, ссылкой на Telegram. */
 export interface AnnounceTopic {
 	order: number;
 	title: string;
 	speaker?: string;
+	/** Telegram спикера: имя в посте становится ссылкой. */
+	speakerUrl?: string;
 	slidesUrl?: string;
 }
 
@@ -42,12 +49,22 @@ export interface AnnounceBook {
 	authors: string[];
 }
 
+/** Человек из каталога клуба (speakers.json) — источник ссылок на Telegram. */
+export interface AnnouncePerson {
+	id: string;
+	name: string;
+	aliases?: string[];
+	telegram?: string;
+}
+
 export interface AnnounceContext {
 	event: AnnounceEvent;
 	book?: AnnounceBook;
 	chapterOrder?: number;
 	chapterTitle?: string;
 	topics: AnnounceTopic[];
+	/** Каталог спикеров клуба: по нему имена ведущих превращаются в ссылки. */
+	directory?: AnnouncePerson[];
 }
 
 const WEEKDAYS = [
@@ -92,11 +109,44 @@ function link(url: string, label: string): string {
 	return `<a href="${esc(url)}">${esc(label)}</a>`;
 }
 
+/** Ссылка на Telegram по значению из каталога (`@handle`, `t.me/handle`). */
+export function telegramUrl(value?: string): string | null {
+	const handle = telegramHandle(value);
+	return handle ? `https://t.me/${handle}` : null;
+}
+
+/** Человек каталога по id спикера, имени или алиасу (регистр не важен). */
+export function findPerson(
+	directory: AnnouncePerson[] | undefined,
+	person: { name?: string | null; speaker_id?: string | null },
+): AnnouncePerson | null {
+	const list = directory ?? [];
+	if (person.speaker_id) {
+		const byId = list.find((p) => p.id === person.speaker_id);
+		if (byId) return byId;
+	}
+	const needle = person.name?.trim().toLowerCase();
+	if (!needle) return null;
+	return (
+		list.find(
+			(p) =>
+				p.name.trim().toLowerCase() === needle ||
+				(p.aliases ?? []).some((a) => a.trim().toLowerCase() === needle),
+		) ?? null
+	);
+}
+
+/** Имя человека ссылкой на его Telegram — если каталог знает ник. */
+function personLink(ctx: AnnounceContext, person: { name: string; speaker_id?: string }): string {
+	const url = telegramUrl(findPerson(ctx.directory, person)?.telegram);
+	return url ? link(url, person.name) : esc(person.name);
+}
+
 /** «Книжный клуб №114: Начинаем новую книгу!» — номер стрима, если задан. */
-function heading(ctx: AnnounceContext, icon: string): string {
+function heading(ctx: AnnounceContext): string {
 	const { event } = ctx;
 	const prefix = event.stream ? `Книжный клуб №${event.stream}` : "Книжный клуб";
-	return `${icon} <b>${esc(prefix)}: ${esc(event.title)}</b>`;
+	return `<b>${esc(prefix)}: ${esc(event.title)}</b>`;
 }
 
 /** «Читаем «Название» (ссылка) — Автор». */
@@ -119,7 +169,7 @@ function assignmentLines(ctx: AnnounceContext): string[] {
 
 	if (event.assignment?.trim()) {
 		const parts = [esc(event.assignment.trim()), pages].filter(Boolean);
-		return [`📖 <b>Готовимся:</b> ${parts.join(", ")}`];
+		return [`<b>Готовимся:</b> ${parts.join(", ")}`];
 	}
 
 	const chapter = ctx.chapterOrder
@@ -134,31 +184,39 @@ function assignmentLines(ctx: AnnounceContext): string[] {
 		event.type === "live-talk"
 			? "на эфире её разбирают докладчики"
 			: "на созвоне разбираем её вместе";
-	return [`📖 <b>Готовимся:</b> ${parts.join(", ")} — ${tail}`];
+	return [`<b>Готовимся:</b> ${parts.join(", ")} — ${tail}`];
 }
 
-/** «🔴 Глава 1 — Восход AI-инженерии — @kunjutone». */
+/**
+ * Программа эфира: «1. Восход AI-инженерии — Антон Помазков» (имя — ссылка
+ * на Telegram). Главу не повторяем в каждой строке: её уже назвало задание.
+ */
 function topicLines(ctx: AnnounceContext): string[] {
-	const order = ctx.chapterOrder;
-	return ctx.topics.map((t) => {
-		const chapter = order ? `Глава ${order} — ` : "";
-		const speaker = t.speaker ? ` — ${esc(t.speaker)}` : " — свободно";
-		return `🔴 ${chapter}${esc(t.title)}${speaker}`;
+	return ctx.topics.map((t, i) => {
+		const speaker = t.speaker
+			? ` — ${t.speakerUrl ? link(t.speakerUrl, t.speaker) : esc(t.speaker)}`
+			: " — свободно";
+		return `${i + 1}. ${esc(t.title)}${speaker}`;
 	});
 }
 
-/** Трансляции, созвон и доска — по одной ссылке на строку. */
+/**
+ * Куда идти: трансляции одной строкой, созвон, доска и материалы — своими.
+ * Вместо иконок ссылки подписаны словами, иначе без эмодзи это просто список.
+ */
 function linkLines(ctx: AnnounceContext): string[] {
 	const { event } = ctx;
 	const lines: string[] = [];
-	if (event.streams?.youtube) lines.push(`📱 ${link(event.streams.youtube, "YouTube")}`);
-	if (event.streams?.vk) lines.push(`📱 ${link(event.streams.vk, "VK")}`);
-	if (event.call_url) lines.push(`🎥 ${link(event.call_url, "Google Meet")}`);
+	const streams: string[] = [];
+	if (event.streams?.youtube) streams.push(link(event.streams.youtube, "YouTube"));
+	if (event.streams?.vk) streams.push(link(event.streams.vk, "VK"));
+	if (streams.length > 0) lines.push(`Трансляция: ${streams.join(" · ")}`);
+	if (event.call_url) lines.push(`Созвон: ${link(event.call_url, "Google Meet")}`);
 	if (event.type === "closed-chapter" && event.notes_board_url) {
-		lines.push(`📋 ${link(event.notes_board_url, "Доска обсуждения")}`);
+		lines.push(link(event.notes_board_url, "Доска обсуждения"));
 	}
 	for (const m of event.materials ?? []) {
-		lines.push(`📎 ${link(m.url, m.title)}`);
+		lines.push(link(m.url, m.title));
 	}
 	return lines;
 }
@@ -167,7 +225,7 @@ function linkLines(ctx: AnnounceContext): string[] {
 function slideLines(ctx: AnnounceContext): string[] {
 	return ctx.topics
 		.filter((t) => t.slidesUrl)
-		.map((t) => `📊 ${link(t.slidesUrl as string, `Презентация — ${t.title}`)}`);
+		.map((t) => link(t.slidesUrl as string, `Презентация — ${t.title}`));
 }
 
 function join(blocks: (string | string[] | null)[]): string {
@@ -180,17 +238,20 @@ function join(blocks: (string | string[] | null)[]): string {
 /** Анонс сразу после создания встречи. */
 export function renderAnnounce(ctx: AnnounceContext): string {
 	const { event } = ctx;
-	const icon = event.type === "live-talk" ? "🔈" : "💬";
-	const moderators = (event.moderators ?? []).map((m) => m.name).filter(Boolean);
+	const moderators = (event.moderators ?? []).filter((m) => m.name);
 
 	return join([
-		heading(ctx, icon),
+		heading(ctx),
 		bookLine(ctx),
-		`🗓 ${formatWhen(event.date, event.time)}`,
+		formatWhen(event.date, event.time),
 		assignmentLines(ctx),
 		// У «докладов» — программа тем; у обсуждения главу уже назвало задание.
-		event.type === "live-talk" ? topicLines(ctx) : [],
-		moderators.length > 0 ? `🎙 Ведут: ${esc(moderators.join(", "))}` : null,
+		event.type === "live-talk" && ctx.topics.length > 0
+			? ["<b>Программа:</b>", ...topicLines(ctx)]
+			: [],
+		moderators.length > 0
+			? `Ведут: ${moderators.map((m) => personLink(ctx, m)).join(", ")}`
+			: null,
 		linkLines(ctx),
 	]);
 }
@@ -199,13 +260,13 @@ export function renderAnnounce(ctx: AnnounceContext): string {
 export function renderDay(ctx: AnnounceContext): string {
 	const { event } = ctx;
 	return join([
-		heading(ctx, "📣"),
+		heading(ctx),
 		bookLine(ctx, "На этом стриме читаем"),
-		`🗓 Сегодня в ${esc(event.time)} МСК`,
+		`Сегодня в ${esc(event.time)} МСК`,
 		event.type === "live-talk" && ctx.topics.length > 0
 			? ["<b>Рассмотрим темы:</b>", ...topicLines(ctx)]
 			: ctx.chapterTitle
-				? [`📕 Разбираем главу ${ctx.chapterOrder} — ${esc(ctx.chapterTitle)}`]
+				? [`Разбираем главу ${ctx.chapterOrder} — ${esc(ctx.chapterTitle)}`]
 				: [],
 		linkLines(ctx),
 		slideLines(ctx),
@@ -216,7 +277,7 @@ export function renderDay(ctx: AnnounceContext): string {
 export function renderSoon(ctx: AnnounceContext): string {
 	const { event } = ctx;
 	return join([
-		`⏳ <b>Через 5 минут начинаем</b> — ${esc(event.title)}`,
+		`<b>Через 5 минут начинаем</b> — ${esc(event.title)}`,
 		linkLines(ctx),
 	]);
 }
@@ -240,19 +301,30 @@ export const KIND_INFO: Record<AnnounceKind, { title: string; when: string }> = 
 	soon: { title: "Напоминание", when: "за 5–10 минут до начала" },
 };
 
-/** Темы главы + спикеры из заявок: одна форма для всех трёх постов. */
+/**
+ * Темы главы + спикеры из заявок: одна форма для всех трёх постов.
+ * Имя берём лучшее из известных — каталог клуба точнее того, что человек
+ * ввёл в заявке, — а ссылку на Telegram: из ника заявки, иначе из каталога.
+ */
 export function buildTopics(
 	chapterTopics: TopicRef[],
 	claims: { topicId: string | null; username: string | null; fullName: string | null; status: string; slidesUrl: string | null }[],
 	chapterOrder?: number,
+	directory?: AnnouncePerson[],
 ): AnnounceTopic[] {
 	return chapterTopics.map((topic, i) => {
 		const claim = claims.find((c) => c.topicId === topic.id && c.status === "confirmed");
-		const speaker = claim?.username ? `@${claim.username}` : (claim?.fullName ?? undefined);
+		const handle = claim?.username ?? null;
+		const person = handle
+			? ((directory ?? []).find((p) => telegramHandle(p.telegram) === handle.toLowerCase()) ?? null)
+			: findPerson(directory, { name: claim?.fullName });
+		const speaker = person?.name ?? claim?.fullName ?? (handle ? `@${handle}` : undefined);
+		const speakerUrl = handle ? `https://t.me/${handle}` : telegramUrl(person?.telegram);
 		return {
 			order: chapterOrder ?? i + 1,
 			title: topic.title,
 			speaker,
+			speakerUrl: speaker ? (speakerUrl ?? undefined) : undefined,
 			slidesUrl: claim?.slidesUrl ?? undefined,
 		};
 	});

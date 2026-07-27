@@ -15,8 +15,10 @@ import {
 	renderAnnouncement,
 	type AnnounceContext,
 	type AnnounceEvent,
+	type AnnouncePerson,
 } from "./announce";
 import { fetchBookMeta, fetchChapter, fetchIndex } from "./api";
+import { bookPageUrl } from "./urls";
 import {
 	getPostDraft,
 	listAnnounceChats,
@@ -28,7 +30,7 @@ import {
 	type PostDraft,
 } from "./db";
 import { sendPhotoByFileId, sendPhotoBytes, sendPost } from "./telegram";
-import type { AnnounceKind } from "../types";
+import type { AnnounceKind, ContentIndex } from "../types";
 
 /** Три поста на встречу: анонс, афиша в день встречи, напоминание перед началом. */
 export const POST_KINDS: AnnounceKind[] = ["announce", "day", "soon"];
@@ -42,9 +44,8 @@ export class NoAnnounceChats extends Error {
 }
 
 /** Папка книги по id или имени папки (в событиях бывает и то, и то). */
-async function resolveBookFolder(bookId?: string): Promise<string | null> {
-	if (!bookId) return null;
-	const index = await fetchIndex();
+function resolveBookFolder(index: ContentIndex | null, bookId?: string): string | null {
+	if (!index || !bookId) return null;
 	return (
 		index.books.find((b) => b.id === bookId)?.folder ??
 		index.books.find((b) => b.folder === bookId)?.folder ??
@@ -54,7 +55,21 @@ async function resolveBookFolder(bookId?: string): Promise<string | null> {
 
 /** Собирает данные для поста: книга, глава, темы со спикерами из заявок. */
 export async function buildContext(env: Env, event: AnnounceEvent): Promise<AnnounceContext> {
-	const folder = await resolveBookFolder(event.book_id);
+	// Реестр нужен и для папки книги, и для каталога спикеров (имена ведущих
+	// в посте — ссылки на Telegram). Если книги у встречи нет, реестр берём
+	// «по возможности»: без него имена просто останутся текстом, а падать
+	// подготовке постов из-за недоступного GitHub не за что.
+	let index: ContentIndex | null = null;
+	if (event.book_id) {
+		index = await fetchIndex();
+	} else if ((event.moderators ?? []).length > 0) {
+		index = await fetchIndex().catch((err) => {
+			console.warn("Каталог спикеров недоступен — ведущие останутся без ссылок:", err);
+			return null;
+		});
+	}
+
+	const folder = resolveBookFolder(index, event.book_id);
 	const meta = folder ? await fetchBookMeta(folder) : null;
 	const chapter = folder && event.chapter ? await fetchChapter(folder, event.chapter) : null;
 
@@ -68,18 +83,28 @@ export async function buildContext(env: Env, event: AnnounceEvent): Promise<Anno
 			}))
 		: [];
 
+	const directory: AnnouncePerson[] = (index?.speakers ?? []).map((s) => ({
+		id: s.id,
+		name: s.name,
+		aliases: s.aliases,
+		telegram: s.socials?.telegram,
+	}));
+
 	return {
 		event,
 		book: meta
 			? {
 					title: meta.title,
-					url: meta.url,
+					// Ссылка на книгу в посте есть всегда: свой url книги (издатель),
+					// иначе её страница в приложении клуба — там главы и карточки.
+					url: meta.url || (folder ? bookPageUrl(env, folder) : undefined),
 					authors: (meta.authors ?? []).map((a) => a.name).filter(Boolean),
 				}
 			: undefined,
 		chapterOrder: chapter?.order,
 		chapterTitle: chapter?.title,
-		topics: chapter ? buildTopics(chapter.topics, claims, chapter.order) : [],
+		topics: chapter ? buildTopics(chapter.topics, claims, chapter.order, directory) : [],
+		directory,
 	};
 }
 

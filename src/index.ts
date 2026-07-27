@@ -51,6 +51,7 @@ import { speakerAccess } from "./lib/members";
 import { fetchPlanTopics } from "./lib/plan";
 import { NoAnnounceChats, prepareDrafts, publishDraft, refreshDraft } from "./lib/announcer";
 import { KIND_INFO, type AnnounceEvent } from "./lib/announce";
+import { miniappUrl } from "./lib/urls";
 import type { AnnounceKind } from "./types";
 import { initialProgress, reviewFromQuality } from "./lib/spaced-repetition";
 import { startStudy } from "./lib/study";
@@ -481,18 +482,15 @@ const BOT_COMMANDS = [
 	{ command: "stop", description: "Отписаться от карточек" },
 ];
 
-/** Мини-приложение клуба по умолчанию (перекрывается env MINIAPP_URL). */
-const DEFAULT_MINIAPP_URL = "https://book-club-miniapp.vercel.app";
-
 /**
  * Настройка бота: POST /api/admin/setup — регистрирует команды меню и кнопку
  * «Открыть приложение» (Mini App). Вызывать после изменения набора команд.
  */
 async function handleAdminSetup(env: Env): Promise<Response> {
-	const miniappUrl = env.MINIAPP_URL || DEFAULT_MINIAPP_URL;
+	const url = miniappUrl(env);
 	await setMyCommands(env.BOT_TOKEN, BOT_COMMANDS);
-	await setChatMenuButton(env.BOT_TOKEN, "🗂 Приложение", miniappUrl);
-	return json({ ok: true, commands: BOT_COMMANDS.map((c) => c.command), menu_button: miniappUrl });
+	await setChatMenuButton(env.BOT_TOKEN, "🗂 Приложение", url);
+	return json({ ok: true, commands: BOT_COMMANDS.map((c) => c.command), menu_button: url });
 }
 
 /** Афиша из CMS приходит base64 — декодируем в байты для sendPhoto. */

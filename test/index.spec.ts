@@ -489,7 +489,12 @@ describe("Посты о встрече в группу клуба", () => {
 		chapterOrder: 1,
 		chapterTitle: "Основы создания AI-приложений",
 		topics: [
-			{ order: 1, title: "Восход AI-инженерии", speaker: "@kunjutone" },
+			{
+				order: 1,
+				title: "Восход AI-инженерии",
+				speaker: "Антон Помазков",
+				speakerUrl: "https://t.me/kunjutone",
+			},
 			{ order: 1, title: "Стек AI-инженерии", speaker: "@Frich22", slidesUrl: "https://slides" },
 			{ order: 1, title: "Планирование AI-приложений" },
 		],
@@ -499,15 +504,61 @@ describe("Посты о встрече в группу клуба", () => {
 		const text = renderAnnounce(ctx);
 		expect(text).toContain("Книжный клуб №114: Начинаем новую книгу!");
 		expect(text).toContain("Пятница, 24 июля, в 18:00 МСК");
-		expect(text).toContain("AI-инженерия");
+		expect(text).toContain('<a href="https://oreilly.com/ai-engineering">«AI-инженерия»</a>');
 		expect(text).toContain("Чип Хьюен");
 		// Задание собирается само: главу и её название бот знает из данных.
 		expect(text).toContain("Готовимся:</b> прочитать главу 1 «Основы создания AI-приложений»");
 		expect(text).toContain("на эфире её разбирают докладчики");
-		expect(text).toContain("🔴 Глава 1 — Восход AI-инженерии — @kunjutone");
+		// Спикер в программе — ссылка на его Telegram.
+		expect(text).toContain(
+			'1. Восход AI-инженерии — <a href="https://t.me/kunjutone">Антон Помазков</a>',
+		);
 		// Тема без заявки не выпадает из программы, а помечается свободной.
-		expect(text).toContain("🔴 Глава 1 — Планирование AI-приложений — свободно");
-		expect(text).toContain('<a href="https://youtu.be/x">YouTube</a>');
+		expect(text).toContain("3. Планирование AI-приложений — свободно");
+		expect(text).toContain('Трансляция: <a href="https://youtu.be/x">YouTube</a>');
+	});
+
+	it("в постах нет эмодзи — структуру держат подзаголовки и ссылки", () => {
+		const emoji = /\p{Extended_Pictographic}/u;
+		const withEverything = {
+			...ctx,
+			event: {
+				...talkEvent,
+				call_url: "https://meet.google.com/abc",
+				materials: [{ title: "Конспект", url: "https://notes" }],
+				moderators: [{ name: "Артём Никифоров", speaker_id: "nikiforov-artem" }],
+			},
+		};
+		for (const text of [
+			renderAnnounce(withEverything),
+			renderDay(withEverything),
+			renderSoon(withEverything),
+		]) {
+			expect(text).not.toMatch(emoji);
+		}
+	});
+
+	it("ведущие — ссылки на Telegram из каталога клуба", () => {
+		const text = renderAnnounce({
+			...ctx,
+			event: {
+				...talkEvent,
+				moderators: [
+					{ name: "Артём Никифоров", speaker_id: "nikiforov-artem" },
+					{ name: "Кто-то со стороны" },
+				],
+			},
+			directory: [
+				{
+					id: "nikiforov-artem",
+					name: "Артём Никифоров",
+					telegram: "https://t.me/Frich22",
+				},
+			],
+		});
+		expect(text).toContain(
+			'Ведут: <a href="https://t.me/frich22">Артём Никифоров</a>, Кто-то со стороны',
+		);
 	});
 
 	it("пост в день встречи: программа и презентации сдавших спикеров", () => {
@@ -541,9 +592,9 @@ describe("Посты о встрече в группу клуба", () => {
 			"Готовимся:</b> прочитать главу 1 «Основы создания AI-приложений», страницы 12–48",
 		);
 		expect(text).toContain("на созвоне разбираем её вместе");
-		expect(text).toContain("Google Meet");
+		expect(text).toContain("Созвон: <a");
 		// Строка «Разбираем главу…» ушла: главу уже назвало задание.
-		expect(text).not.toContain("📕");
+		expect(text).not.toContain("Разбираем главу");
 	});
 
 	it("явный assignment перекрывает шаблон", () => {
@@ -564,7 +615,7 @@ describe("Посты о встрече в группу клуба", () => {
 		expect(text).toContain("&lt;b&gt;взлом&lt;/b&gt;");
 	});
 
-	it("спикер берётся только из подтверждённой заявки", () => {
+	it("спикер берётся только из подтверждённой заявки, имя — ссылкой на Telegram", () => {
 		const topics = buildTopics(
 			[
 				{ id: "t1", title: "Тема 1" },
@@ -575,9 +626,27 @@ describe("Посты о встрече в группу клуба", () => {
 				{ topicId: "t2", username: "someone", fullName: "Ещё кто-то", status: "pending", slidesUrl: null },
 			],
 			3,
+			[{ id: "pomazkov-anton", name: "Антон Помазков", telegram: "@kunjutone" }],
 		);
-		expect(topics[0]).toMatchObject({ order: 3, speaker: "@kunjutone" });
+		// Имя из каталога точнее того, что человек ввёл в заявке.
+		expect(topics[0]).toMatchObject({
+			order: 3,
+			speaker: "Антон Помазков",
+			speakerUrl: "https://t.me/kunjutone",
+		});
 		expect(topics[1].speaker).toBeUndefined();
+	});
+
+	it("без каталога спикер остаётся @ником, но со ссылкой", () => {
+		const topics = buildTopics(
+			[{ id: "t1", title: "Тема 1" }],
+			[{ topicId: "t1", username: "Frich22", fullName: null, status: "confirmed", slidesUrl: null }],
+			1,
+		);
+		expect(topics[0]).toMatchObject({
+			speaker: "@Frich22",
+			speakerUrl: "https://t.me/Frich22",
+		});
 	});
 
 	// Для черновиков берём встречу без книги и главы: тогда рендер не идёт

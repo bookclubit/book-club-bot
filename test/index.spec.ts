@@ -12,6 +12,7 @@ import {
 	selectDue,
 } from "../src/lib/spaced-repetition";
 import { eventDateFromPath, eventPathById } from "../src/lib/events";
+import { renderBack } from "../src/lib/cards";
 import { buildTopics, renderAnnounce, renderDay, renderSoon } from "../src/lib/announce";
 import {
 	getDraftPoster,
@@ -371,6 +372,38 @@ describe("selectDue (общая для бота и рассылки выборк
 		]);
 		const due = selectDue(deck, keyOf, progress, now, 5);
 		expect(due.map((d) => d.card.id)).toEqual(["b", "c"]);
+	});
+});
+
+describe("Рендер карточки", () => {
+	const base = { id: "docker-007", chapter: "2", difficulty: "easy" } as const;
+
+	it("пример показывается под ответом, если он задан", () => {
+		const text = renderBack({
+			...base,
+			type: "command",
+			command: "docker ps",
+			result: "список запущенных контейнеров",
+			example: "docker ps -a  # включая остановленные",
+		});
+		expect(text).toContain("Что делает:");
+		expect(text).toContain("<b>Пример:</b>\n<pre>docker ps -a  # включая остановленные</pre>");
+	});
+
+	it("без примера лишнего блока нет", () => {
+		const text = renderBack({ ...base, type: "qa", question: "q", answer: "a" });
+		expect(text).not.toContain("Пример");
+	});
+
+	it("пример экранируется — в нём бывают угловые скобки", () => {
+		const text = renderBack({
+			...base,
+			type: "qa",
+			question: "q",
+			answer: "a",
+			example: "<div>hi</div>",
+		});
+		expect(text).toContain("&lt;div&gt;hi&lt;/div&gt;");
 	});
 });
 

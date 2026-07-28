@@ -57,16 +57,25 @@ export function renderFront(card: Flashcard): string {
 	return `⌨️ <b>Команда</b>\n\n<code>${esc(card.command)}</code>\n\nЧто делает эта команда?\n\n${footer(card)}`;
 }
 
+/**
+ * Пример к ответу, если он есть у карточки. Моноширинный: примером обычно
+ * бывает код или вывод команды.
+ */
+function example(card: Flashcard): string {
+	const text = card.example?.trim();
+	return text ? `<b>Пример:</b>\n<pre>${esc(text)}</pre>\n\n` : "";
+}
+
 /** Обратная сторона карточки (с ответом). */
 export function renderBack(card: Flashcard): string {
 	if (card.type === "qa") {
 		return (
 			`📖 <b>Вопрос</b>\n\n${esc(card.question)}\n\n` +
-			`💡 <b>Ответ:</b>\n${esc(card.answer)}\n\n${footer(card)}`
+			`💡 <b>Ответ:</b>\n${esc(card.answer)}\n\n${example(card)}${footer(card)}`
 		);
 	}
 	return (
 		`⌨️ <b>Команда</b>\n\n<code>${esc(card.command)}</code>\n\n` +
-		`💡 <b>Что делает:</b>\n${esc(card.result)}\n\n${footer(card)}`
+		`💡 <b>Что делает:</b>\n${esc(card.result)}\n\n${example(card)}${footer(card)}`
 	);
 }

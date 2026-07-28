@@ -6,6 +6,8 @@ interface FlashcardBase {
 	id: string;
 	chapter: string;
 	difficulty: "easy" | "medium" | "hard";
+	/** Пример к ответу — необязателен: приходит под ответом отдельным блоком. */
+	example?: string;
 }
 
 /** Карточка «вопрос — ответ». */

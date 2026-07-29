@@ -51,8 +51,13 @@ import {
 	setPostDraftPoster,
 	setPostDraftSchedule,
 	setPostDraftText,
+	setTopicVote,
+	getTopicRating,
+	getUserTopicVotes,
+	listTopicRatings,
 	type MembershipRequest,
 } from "../src/lib/db";
+import { MIN_RATING_VOTES, wilsonScore } from "../src/lib/rating";
 import { speakerAccess } from "../src/lib/members";
 import { membershipPrompt, speakerIntro } from "../src/handlers/registration";
 import {
@@ -967,5 +972,121 @@ describe("Участие в клубе: темы берут только уча�
 		expect(claim.status).toBe(401);
 		expect(apply.status).toBe(401);
 		expect(members.status).toBe(401);
+	});
+})
+
+describe("Оценки тем и рейтинг", () => {
+	it("Уилсон: одна оценка не даёт 100%, «не очень» тянут вниз", () => {
+		expect(wilsonScore(0, 0)).toBe(0);
+		// Одна оценка «полезно» — не повод обгонять тему с двадцатью.
+		expect(wilsonScore(1, 0)).toBeLessThan(0.9);
+		expect(wilsonScore(1, 0)).toBeLessThan(wilsonScore(20, 0));
+		expect(wilsonScore(9, 1)).toBeGreaterThan(wilsonScore(5, 5));
+		expect(wilsonScore(100, 0)).toBeGreaterThan(0.95);
+		// Рейтинг — не число лайков: у темы с равными долями он ниже половины.
+		expect(wilsonScore(5, 5)).toBeLessThan(0.5);
+	});
+
+	it("одна оценка на человека: повтор перезаписывает, 0 снимает", async () => {
+		resetSchemaCacheForTests();
+		const db = env.BOOK_CLUB_DB;
+
+		await setTopicVote(db, 1, "docker-intro-9-1", 1);
+		await setTopicVote(db, 2, "docker-intro-9-1", 1);
+		await setTopicVote(db, 3, "docker-intro-9-1", -1);
+		expect(await getTopicRating(db, "docker-intro-9-1")).toMatchObject({ up: 2, down: 1 });
+
+		// Тот же человек передумал — новой строки не появляется.
+		await setTopicVote(db, 3, "docker-intro-9-1", 1);
+		expect(await getTopicRating(db, "docker-intro-9-1")).toMatchObject({ up: 3, down: 0 });
+
+		// Снятие оценки убирает голос совсем.
+		await setTopicVote(db, 3, "docker-intro-9-1", 0);
+		expect(await getTopicRating(db, "docker-intro-9-1")).toMatchObject({ up: 2, down: 0 });
+		expect(await getUserTopicVotes(db, 3)).toEqual({});
+		expect(await getUserTopicVotes(db, 1)).toEqual({ "docker-intro-9-1": 1 });
+
+		const list = await listTopicRatings(db);
+		expect(list).toHaveLength(1);
+		expect(list[0]).toMatchObject({ topic_id: "docker-intro-9-1", up: 2, down: 0 });
+
+		// Неоценённая тема — нули, а не отсутствие ответа.
+		expect(await getTopicRating(db, "нет-такой-темы")).toMatchObject({ up: 0, down: 0 });
+	});
+
+	it("оценка требует входа, а рейтинг видят все", async () => {
+		resetSchemaCacheForTests();
+		const ctxExec = createExecutionContext();
+		const vote = await worker.fetch(
+			new IncomingRequest("http://example.com/api/topics/vote", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ topic_id: "t1", vote: 1 }),
+			}),
+			env,
+			ctxExec,
+		);
+		const ratings = await worker.fetch(
+			new IncomingRequest("http://example.com/api/topics/ratings"),
+			env,
+			ctxExec,
+		);
+		await waitOnExecutionContext(ctxExec);
+
+		expect(vote.status).toBe(401);
+		expect(ratings.status).toBe(200);
+		const data = (await ratings.json()) as {
+			ratings: unknown[];
+			my: Record<string, number>;
+			min_votes: number;
+		};
+		expect(data.ratings).toEqual([]);
+		expect(data.my).toEqual({});
+		expect(data.min_votes).toBe(MIN_RATING_VOTES);
+	});
+
+	it("вошедший оценивает тему, свой голос возвращается в my", async () => {
+		resetSchemaCacheForTests();
+		// В тестовом env секрета нет — подписываем сессии своим токеном.
+		const testEnv = env as unknown as { BOT_TOKEN?: string };
+		testEnv.BOT_TOKEN ??= "123456:test-bot-token";
+		const token = await mintSession(testEnv.BOT_TOKEN, 4242);
+		const authed = (body: unknown) =>
+			new IncomingRequest("http://example.com/api/topics/vote", {
+				method: "POST",
+				headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+				body: JSON.stringify(body),
+			});
+
+		const ctxExec = createExecutionContext();
+		const up = await worker.fetch(authed({ topic_id: "docker-intro-8-1", vote: 1 }), env, ctxExec);
+		expect(up.status).toBe(200);
+		expect(await up.json()).toMatchObject({
+			rating: { topic_id: "docker-intro-8-1", up: 1, down: 0, votes: 1 },
+			my_vote: 1,
+		});
+
+		// Свои оценки приезжают вместе с рейтингом — кнопки в miniapp нажаты.
+		const mine = await worker.fetch(
+			new IncomingRequest("http://example.com/api/topics/ratings", {
+				headers: { authorization: `Bearer ${token}` },
+			}),
+			env,
+			ctxExec,
+		);
+		const data = (await mine.json()) as { my: Record<string, number>; ratings: { score: number }[] };
+		expect(data.my).toEqual({ "docker-intro-8-1": 1 });
+		expect(data.ratings[0].score).toBeGreaterThan(0);
+
+		// Снятие оценки — тема остаётся без голосов.
+		const off = await worker.fetch(authed({ topic_id: "docker-intro-8-1", vote: 0 }), env, ctxExec);
+		expect(await off.json()).toMatchObject({ rating: { votes: 0 }, my_vote: 0 });
+
+		// Чужие значения не принимаем.
+		const bad = await worker.fetch(authed({ topic_id: "docker-intro-8-1", vote: 5 }), env, ctxExec);
+		const noTopic = await worker.fetch(authed({ vote: 1 }), env, ctxExec);
+		await waitOnExecutionContext(ctxExec);
+		expect(bad.status).toBe(400);
+		expect(noTopic.status).toBe(400);
 	});
 })

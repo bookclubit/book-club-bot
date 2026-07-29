@@ -47,11 +47,16 @@ import {
 	setPostDraftApproved,
 	setPostDraftSchedule,
 	setPostDraftText,
+	setTopicVote,
+	getTopicRating,
+	getUserTopicVotes,
+	listTopicRatings,
 	updateSpeakerClaim,
 	upsertUser,
 	wasReminderSent,
 } from "./lib/db";
 import { speakerAccess } from "./lib/members";
+import { MIN_RATING_VOTES, wilsonScore } from "./lib/rating";
 import { fetchPlanTopics } from "./lib/plan";
 import {
 	getDraftPoster,
@@ -992,6 +997,60 @@ async function handleReview(env: Env, userId: number, request: Request): Promise
 	return json({ progress: next });
 }
 
+/** Свод оценок темы для клиента: голоса и рейтинг (нижняя граница Уилсона). */
+function ratingPayload(row: { topic_id: string; up: number; down: number }) {
+	return {
+		topic_id: row.topic_id,
+		up: row.up,
+		down: row.down,
+		votes: row.up + row.down,
+		score: wilsonScore(row.up, row.down),
+	};
+}
+
+/**
+ * Оценки тем: GET /api/topics/ratings.
+ * Публичный (рейтинг виден и без входа). Если сессия передана — добавляем `my`:
+ * что этот человек уже оценил, чтобы кнопки в miniapp были нажатыми.
+ */
+async function handleTopicRatings(env: Env, request: Request): Promise<Response> {
+	const rows = await listTopicRatings(env.BOOK_CLUB_DB);
+	const userId = await authUser(env, request);
+	const my = userId === null ? {} : await getUserTopicVotes(env.BOOK_CLUB_DB, userId);
+	return json({
+		ratings: rows.map(ratingPayload),
+		my,
+		min_votes: MIN_RATING_VOTES,
+	});
+}
+
+/**
+ * Оценка темы: POST /api/topics/vote { topic_id, vote }.
+ * vote: 1 — «полезно», -1 — «не очень», 0 — снять свою оценку.
+ * Оценивать может любой вошедший — это отзыв слушателя, а не бронь темы,
+ * поэтому участие в клубе здесь не требуется.
+ */
+async function handleTopicVote(env: Env, userId: number, request: Request): Promise<Response> {
+	let body: { topic_id?: string; vote?: number };
+	try {
+		body = (await request.json()) as typeof body;
+	} catch {
+		return json({ error: "невалидный JSON" }, 400);
+	}
+	const topicId = body.topic_id?.trim();
+	const vote = Number(body.vote);
+	if (!topicId || topicId.length > 100) {
+		return json({ error: "нужен topic_id" }, 400);
+	}
+	if (vote !== 1 && vote !== -1 && vote !== 0) {
+		return json({ error: "vote ∈ 1 (полезно), -1 (не очень), 0 (снять оценку)" }, 400);
+	}
+
+	await setTopicVote(env.BOOK_CLUB_DB, userId, topicId, vote as 1 | -1 | 0);
+	const rating = await getTopicRating(env.BOOK_CLUB_DB, topicId);
+	return json({ rating: ratingPayload(rating), my_vote: vote });
+}
+
 async function handleApi(env: Env, request: Request, url: URL): Promise<Response> {
 	const cors = corsFor(env, request, url);
 	if (request.method === "OPTIONS") {
@@ -1014,6 +1073,11 @@ async function routeApi(env: Env, request: Request, url: URL): Promise<Response>
 		return handleClaimsApi(env);
 	}
 
+	// Рейтинг тем виден всем; сессия нужна только чтобы отметить свои оценки.
+	if (url.pathname === "/api/topics/ratings" && request.method === "GET") {
+		return handleTopicRatings(env, request);
+	}
+
 	// Платформа: вход и единый прогресс карточек (сессия из Telegram-подписи).
 	if (url.pathname === "/api/auth/telegram" && request.method === "POST") {
 		return handleAuthTelegram(env, request);
@@ -1024,7 +1088,8 @@ async function routeApi(env: Env, request: Request, url: URL): Promise<Response>
 		url.pathname === "/api/review" ||
 		url.pathname === "/api/settings" ||
 		url.pathname === "/api/membership" ||
-		url.pathname === "/api/claim"
+		url.pathname === "/api/claim" ||
+		url.pathname === "/api/topics/vote"
 	) {
 		const userId = await authUser(env, request);
 		if (userId === null) return json({ error: "нужен вход через Telegram" }, 401);
@@ -1043,6 +1108,9 @@ async function routeApi(env: Env, request: Request, url: URL): Promise<Response>
 		}
 		if (url.pathname === "/api/review" && request.method === "POST") {
 			return handleReview(env, userId, request);
+		}
+		if (url.pathname === "/api/topics/vote" && request.method === "POST") {
+			return handleTopicVote(env, userId, request);
 		}
 		if (url.pathname === "/api/settings" && request.method === "GET") {
 			return handleGetSettings(env, userId);

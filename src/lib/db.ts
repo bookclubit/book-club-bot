@@ -214,17 +214,6 @@ const SCHEMA = [
 		updated_at INTEGER NOT NULL,
 		UNIQUE (event_id, kind)
 	)`,
-	// Оценки тем: 1 — «полезно», -1 — «не очень». Одна оценка на человека,
-	// повторный голос перезаписывает её, отмена — удаляет строку. Ключ — id темы
-	// из book-club-data (он неизменяем), поэтому оценки живут дольше правок главы.
-	`CREATE TABLE IF NOT EXISTS topic_votes (
-		topic_id TEXT NOT NULL,
-		user_id INTEGER NOT NULL,
-		vote INTEGER NOT NULL,
-		created_at INTEGER NOT NULL,
-		updated_at INTEGER NOT NULL,
-		PRIMARY KEY (topic_id, user_id)
-	)`,
 	// Настройки бота, задаваемые из чата (например чат для анонсов).
 	`CREATE TABLE IF NOT EXISTS bot_settings (
 		key TEXT PRIMARY KEY,
@@ -1227,89 +1216,3 @@ export async function setBotSetting(db: D1Database, key: string, value: string):
 		.run();
 }
 
-// ── Оценки тем ───────────────────────────────────────────────────────────────
-
-/** Оценка темы: 1 — «полезно», -1 — «не очень». */
-export type TopicVote = 1 | -1;
-
-/** Свод оценок темы. */
-export interface TopicRatingRow {
-	topic_id: string;
-	up: number;
-	down: number;
-}
-
-/**
- * Ставит (или меняет) оценку темы. `vote = 0` снимает свою оценку.
- * Одна оценка на человека — повторный голос перезаписывает предыдущий.
- */
-export async function setTopicVote(
-	db: D1Database,
-	userId: number,
-	topicId: string,
-	vote: TopicVote | 0,
-	now = Date.now(),
-): Promise<void> {
-	await ensureSchema(db);
-	if (vote === 0) {
-		await db
-			.prepare("DELETE FROM topic_votes WHERE topic_id = ? AND user_id = ?")
-			.bind(topicId, userId)
-			.run();
-		return;
-	}
-	await db
-		.prepare(
-			`INSERT INTO topic_votes (topic_id, user_id, vote, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?)
-			 ON CONFLICT(topic_id, user_id) DO UPDATE SET
-			   vote = excluded.vote,
-			   updated_at = excluded.updated_at`,
-		)
-		.bind(topicId, userId, vote, now, now)
-		.run();
-}
-
-/** Свод оценок по всем темам (только у тех, кого хоть раз оценили). */
-export async function listTopicRatings(db: D1Database): Promise<TopicRatingRow[]> {
-	await ensureSchema(db);
-	const { results } = await db
-		.prepare(
-			`SELECT topic_id,
-			        SUM(CASE WHEN vote > 0 THEN 1 ELSE 0 END) AS up,
-			        SUM(CASE WHEN vote < 0 THEN 1 ELSE 0 END) AS down
-			   FROM topic_votes
-			  GROUP BY topic_id`,
-		)
-		.all<TopicRatingRow>();
-	return results;
-}
-
-/** Свод оценок одной темы (нули, если её ещё не оценивали). */
-export async function getTopicRating(db: D1Database, topicId: string): Promise<TopicRatingRow> {
-	await ensureSchema(db);
-	const row = await db
-		.prepare(
-			`SELECT SUM(CASE WHEN vote > 0 THEN 1 ELSE 0 END) AS up,
-			        SUM(CASE WHEN vote < 0 THEN 1 ELSE 0 END) AS down
-			   FROM topic_votes WHERE topic_id = ?`,
-		)
-		.bind(topicId)
-		.first<{ up: number | null; down: number | null }>();
-	return { topic_id: topicId, up: row?.up ?? 0, down: row?.down ?? 0 };
-}
-
-/** Оценки пользователя: id темы → его голос. */
-export async function getUserTopicVotes(
-	db: D1Database,
-	userId: number,
-): Promise<Record<string, TopicVote>> {
-	await ensureSchema(db);
-	const { results } = await db
-		.prepare("SELECT topic_id, vote FROM topic_votes WHERE user_id = ?")
-		.bind(userId)
-		.all<{ topic_id: string; vote: number }>();
-	const map: Record<string, TopicVote> = {};
-	for (const row of results) map[row.topic_id] = row.vote > 0 ? 1 : -1;
-	return map;
-}

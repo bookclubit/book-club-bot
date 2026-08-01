@@ -2,8 +2,8 @@
 // тем считается отдельно по заявкам D1 (единый источник) — см. registration.ts.
 
 import type { TopicRef } from "../types";
-import { fetchChapter, fetchEventByPath, fetchIndex } from "./api";
-import { eventArchived, eventDateFromPath, mskToday } from "./events";
+import { fetchEventByPath, fetchIndex } from "./api";
+import { eventArchived, eventDateFromPath, fetchEventProgram, mskToday } from "./events";
 
 export interface PlanTopic {
 	topic: TopicRef;
@@ -28,30 +28,27 @@ export async function fetchPlanTopics(): Promise<PlanTopic[]> {
 		.map((e) => e.p);
 	if (planPaths.length === 0) return [];
 
-	// Главы будущих докладов: (папка книги, slug главы) из событий.
-	const chapters = new Map<string, { folder: string; bookId: string; bookTitle: string; slug: string }>();
+	// Программа эфира — блоками: на одном стриме бывает несколько глав и книг.
+	// Темы берём ровно те, что в программе (у блока может быть свой набор).
+	const topics: PlanTopic[] = [];
+	const seen = new Set<string>();
 	for (const path of planPaths) {
 		const event = await fetchEventByPath(path);
-		if (!event?.book_id || !event.chapter) continue;
+		if (!event) continue;
 		// Прошедший эфир тем не даёт — то же правило, что в плане на сайте.
 		if (eventArchived(event)) continue;
-		const book =
-			index.books.find((b) => b.id === event.book_id) ??
-			index.books.find((b) => b.folder === event.book_id);
-		if (!book) continue;
-		chapters.set(`${book.folder}/${event.chapter}`, {
-			folder: book.folder,
-			bookId: book.id,
-			bookTitle: book.title,
-			slug: event.chapter,
-		});
-	}
-
-	const topics: PlanTopic[] = [];
-	for (const ch of chapters.values()) {
-		const chapter = await fetchChapter(ch.folder, ch.slug);
-		for (const topic of chapter?.topics ?? []) {
-			topics.push({ topic, bookId: ch.bookId, bookTitle: ch.bookTitle, chapterSlug: ch.slug });
+		for (const block of await fetchEventProgram(event)) {
+			const book = index.books.find((b) => b.folder === block.folder);
+			for (const topic of block.topics) {
+				if (seen.has(topic.id)) continue;
+				seen.add(topic.id);
+				topics.push({
+					topic,
+					bookId: book?.id ?? block.bookId,
+					bookTitle: book?.title ?? "",
+					chapterSlug: block.chapterSlug,
+				});
+			}
 		}
 	}
 	return topics;

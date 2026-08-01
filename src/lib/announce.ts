@@ -23,6 +23,9 @@ export interface AnnounceEvent {
 	stream?: number;
 	book_id?: string;
 	chapter?: string;
+	topic_ids?: string[];
+	/** Программа эфира блоками — когда глав (или книг) на стриме несколько. */
+	program?: { book_id: string; chapter: string; topic_ids?: string[] }[];
 	/** Что сделать до встречи: прочитать главу, подготовить вопросы… */
 	assignment?: string;
 	pages?: { from: number; to: number };
@@ -57,14 +60,35 @@ export interface AnnouncePerson {
 	telegram?: string;
 }
 
+/** Глава программы эфира со своими темами. */
+export interface AnnounceChapter {
+	order: number;
+	title?: string;
+	/** Название книги — подписываем, только если книг в программе несколько. */
+	bookTitle?: string;
+	topics: AnnounceTopic[];
+}
+
 export interface AnnounceContext {
 	event: AnnounceEvent;
 	book?: AnnounceBook;
 	chapterOrder?: number;
 	chapterTitle?: string;
 	topics: AnnounceTopic[];
+	/**
+	 * Программа блоками. Одна глава — можно не задавать: тогда сойдёт
+	 * `chapterOrder`/`chapterTitle` и плоский `topics`.
+	 */
+	chapters?: AnnounceChapter[];
 	/** Каталог спикеров клуба: по нему имена ведущих превращаются в ссылки. */
 	directory?: AnnouncePerson[];
+}
+
+/** Программа как список глав — одинаково для одной главы и для нескольких. */
+function programChapters(ctx: AnnounceContext): AnnounceChapter[] {
+	if (ctx.chapters && ctx.chapters.length > 0) return ctx.chapters;
+	if (ctx.chapterOrder === undefined) return [];
+	return [{ order: ctx.chapterOrder, title: ctx.chapterTitle, topics: ctx.topics }];
 }
 
 const WEEKDAYS = [
@@ -172,11 +196,20 @@ function assignmentLines(ctx: AnnounceContext): string[] {
 		return [`<b>Готовимся:</b> ${parts.join(", ")}`];
 	}
 
-	const chapter = ctx.chapterOrder
-		? ctx.chapterTitle
-			? `прочитать главу ${ctx.chapterOrder} «${esc(ctx.chapterTitle)}»`
-			: `прочитать главу ${ctx.chapterOrder}`
-		: null;
+	// Глав на стриме может быть несколько (и даже из разных книг) — тогда
+	// перечисляем все: «прочитать главы 9 «…» и 10 «…»».
+	const list = programChapters(ctx);
+	const named = list.map((c) => {
+		const title = c.title ? ` «${esc(c.title)}»` : "";
+		const book = c.bookTitle ? ` (${esc(c.bookTitle)})` : "";
+		return `${c.order}${title}${book}`;
+	});
+	const chapter =
+		named.length === 0
+			? null
+			: named.length === 1
+				? `прочитать главу ${named[0]}`
+				: `прочитать главы ${named.slice(0, -1).join(", ")} и ${named[named.length - 1]}`;
 	const parts = [chapter, pages].filter(Boolean);
 	if (parts.length === 0) return [];
 
@@ -189,15 +222,31 @@ function assignmentLines(ctx: AnnounceContext): string[] {
 
 /**
  * Программа эфира: «1. Восход AI-инженерии — Антон Помазков» (имя — ссылка
- * на Telegram). Главу не повторяем в каждой строке: её уже назвало задание.
+ * на Telegram). Одна глава — просто нумерованный список: её уже назвало
+ * задание. Несколько — темы группируются подзаголовком главы, а нумерация
+ * идёт сквозной: это порядок вечера, а не оглавление книги.
  */
 function topicLines(ctx: AnnounceContext): string[] {
-	return ctx.topics.map((t, i) => {
-		const speaker = t.speaker
-			? ` — ${t.speakerUrl ? link(t.speakerUrl, t.speaker) : esc(t.speaker)}`
-			: " — свободно";
-		return `${i + 1}. ${esc(t.title)}${speaker}`;
-	});
+	const chapters = programChapters(ctx);
+	const lines: string[] = [];
+	let n = 0;
+	const many = chapters.length > 1;
+	for (const chapter of chapters) {
+		if (chapter.topics.length === 0) continue;
+		if (many) {
+			const book = chapter.bookTitle ? `${esc(chapter.bookTitle)}, ` : "";
+			const title = chapter.title ? ` — ${esc(chapter.title)}` : "";
+			lines.push(`${book}глава ${chapter.order}${title}:`);
+		}
+		for (const t of chapter.topics) {
+			n += 1;
+			const speaker = t.speaker
+				? ` — ${t.speakerUrl ? link(t.speakerUrl, t.speaker) : esc(t.speaker)}`
+				: " — свободно";
+			lines.push(`${n}. ${esc(t.title)}${speaker}`);
+		}
+	}
+	return lines;
 }
 
 /**
@@ -246,7 +295,7 @@ export function renderAnnounce(ctx: AnnounceContext): string {
 		formatWhen(event.date, event.time),
 		assignmentLines(ctx),
 		// У «докладов» — программа тем; у обсуждения главу уже назвало задание.
-		event.type === "live-talk" && ctx.topics.length > 0
+		event.type === "live-talk" && topicLines(ctx).length > 0
 			? ["<b>Программа:</b>", ...topicLines(ctx)]
 			: [],
 		moderators.length > 0
@@ -263,7 +312,7 @@ export function renderDay(ctx: AnnounceContext): string {
 		heading(ctx),
 		bookLine(ctx, "На этом стриме читаем"),
 		`Сегодня в ${esc(event.time)} МСК`,
-		event.type === "live-talk" && ctx.topics.length > 0
+		event.type === "live-talk" && topicLines(ctx).length > 0
 			? ["<b>Рассмотрим темы:</b>", ...topicLines(ctx)]
 			: ctx.chapterTitle
 				? [`Разбираем главу ${ctx.chapterOrder} — ${esc(ctx.chapterTitle)}`]

@@ -1,6 +1,6 @@
 // Работа с событиями клуба: id ↔ путь файла, загрузка, рендер ссылок.
 
-import type { ClubEvent, ContentIndex, TopicRef } from "../types";
+import type { ClubEvent, ContentIndex, ProgramBlock, TopicRef } from "../types";
 import { fetchChapter, fetchEventByPath, fetchIndex } from "./api";
 
 /**
@@ -34,19 +34,64 @@ export async function fetchEventById(eventId: string): Promise<ClubEvent | null>
 }
 
 /**
- * Темы программы события: у докладов указаны book_id и chapter, темы берутся
- * из chapter.json. book_id может быть и id из meta, и именем папки —
- * резолвим через реестр.
+ * Программа эфира блоками. Единственное место, где решается, откуда её брать:
+ * новое поле `program` или старые `book_id`/`chapter`/`topic_ids` прямо
+ * в событии (одна глава — один блок). Остальной код работает только с этим.
  */
-export async function fetchEventTopics(event: ClubEvent): Promise<TopicRef[]> {
-	if (event.type !== "live-talk" || !event.book_id || !event.chapter) return [];
+export function eventProgram(event: ClubEvent): ProgramBlock[] {
+	if (event.type !== "live-talk") return [];
+	const blocks = (event.program ?? []).filter((b) => b.book_id && b.chapter);
+	if (blocks.length > 0) return blocks;
+	if (!event.book_id || !event.chapter) return [];
+	return [{ book_id: event.book_id, chapter: event.chapter, topic_ids: event.topic_ids }];
+}
+
+/** Блок программы с загруженной главой: то, что показывают посты и слайды. */
+export interface ProgramChapter {
+	bookId: string;
+	folder: string;
+	chapterSlug: string;
+	chapterOrder: number;
+	chapterTitle: string;
+	topics: TopicRef[];
+}
+
+/**
+ * Главы программы с темами. Тем берём только те, что указаны в блоке
+ * (`topic_ids`); пусто — вся глава. book_id бывает и id из meta, и именем
+ * папки — резолвим через реестр.
+ */
+export async function fetchEventProgram(event: ClubEvent): Promise<ProgramChapter[]> {
+	const blocks = eventProgram(event);
+	if (blocks.length === 0) return [];
 	const index: ContentIndex = await fetchIndex();
-	const folder =
-		index.books.find((b) => b.id === event.book_id)?.folder ??
-		index.books.find((b) => b.folder === event.book_id)?.folder;
-	if (!folder) return [];
-	const chapter = await fetchChapter(folder, event.chapter);
-	return chapter?.topics ?? [];
+
+	const loaded: ProgramChapter[] = [];
+	for (const block of blocks) {
+		const folder =
+			index.books.find((b) => b.id === block.book_id)?.folder ??
+			index.books.find((b) => b.folder === block.book_id)?.folder;
+		if (!folder) continue;
+		const chapter = await fetchChapter(folder, block.chapter);
+		if (!chapter) continue;
+		const picked = block.topic_ids?.length
+			? (chapter.topics ?? []).filter((t) => block.topic_ids!.includes(t.id))
+			: (chapter.topics ?? []);
+		loaded.push({
+			bookId: block.book_id,
+			folder,
+			chapterSlug: block.chapter,
+			chapterOrder: chapter.order,
+			chapterTitle: chapter.title,
+			topics: picked,
+		});
+	}
+	return loaded;
+}
+
+/** Все темы программы подряд — когда книга и глава уже не важны. */
+export async function fetchEventTopics(event: ClubEvent): Promise<TopicRef[]> {
+	return (await fetchEventProgram(event)).flatMap((c) => c.topics);
 }
 
 /** Дата (YYYY-MM-DD) из пути события `<dir>/<date>-<slug>.json`. */

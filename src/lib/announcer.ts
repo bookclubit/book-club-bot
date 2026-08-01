@@ -13,6 +13,7 @@ import {
 	buildTopics,
 	CAPTION_LIMIT,
 	renderAnnouncement,
+	type AnnounceChapter,
 	type AnnounceContext,
 	type AnnounceEvent,
 	type AnnouncePerson,
@@ -72,19 +73,28 @@ export async function buildContext(env: Env, event: AnnounceEvent): Promise<Anno
 		});
 	}
 
-	const folder = resolveBookFolder(index, event.book_id);
-	const meta = folder ? await fetchBookMeta(folder) : null;
-	const chapter = folder && event.chapter ? await fetchChapter(folder, event.chapter) : null;
+	// Программа блоками: на стриме бывает несколько глав и даже книг. Старые
+	// встречи (и обсуждения главы) — это тот же один блок.
+	const blocks =
+		event.program && event.program.length > 0
+			? event.program
+			: event.book_id && event.chapter
+				? [{ book_id: event.book_id, chapter: event.chapter, topic_ids: event.topic_ids }]
+				: [];
 
-	const claims = chapter
-		? (await listSpeakerClaims(env.BOOK_CLUB_DB)).map((c) => ({
-				topicId: c.topic_id,
-				username: c.username,
-				fullName: c.full_name,
-				status: c.status,
-				slidesUrl: c.slides_url,
-			}))
-		: [];
+	const folder = resolveBookFolder(index, event.book_id ?? blocks[0]?.book_id);
+	const meta = folder ? await fetchBookMeta(folder) : null;
+
+	const claims =
+		blocks.length > 0
+			? (await listSpeakerClaims(env.BOOK_CLUB_DB)).map((c) => ({
+					topicId: c.topic_id,
+					username: c.username,
+					fullName: c.full_name,
+					status: c.status,
+					slidesUrl: c.slides_url,
+				}))
+			: [];
 
 	const directory: AnnouncePerson[] = (index?.speakers ?? []).map((s) => ({
 		id: s.id,
@@ -92,6 +102,28 @@ export async function buildContext(env: Env, event: AnnounceEvent): Promise<Anno
 		aliases: s.aliases,
 		telegram: s.socials?.telegram,
 	}));
+
+	// Книг в программе может быть несколько — тогда каждую главу подписываем
+	// её книгой, иначе название книги в программе только шумит.
+	const manyBooks = new Set(blocks.map((b) => b.book_id)).size > 1;
+
+	const chapters: AnnounceChapter[] = [];
+	for (const block of blocks) {
+		const blockFolder = resolveBookFolder(index, block.book_id);
+		if (!blockFolder) continue;
+		const loaded = await fetchChapter(blockFolder, block.chapter);
+		if (!loaded) continue;
+		const picked = block.topic_ids?.length
+			? (loaded.topics ?? []).filter((t) => block.topic_ids!.includes(t.id))
+			: (loaded.topics ?? []);
+		const blockMeta = blockFolder === folder ? meta : await fetchBookMeta(blockFolder);
+		chapters.push({
+			order: loaded.order,
+			title: loaded.title,
+			bookTitle: manyBooks ? blockMeta?.title : undefined,
+			topics: buildTopics(picked, claims, loaded.order, directory),
+		});
+	}
 
 	return {
 		event,
@@ -104,9 +136,10 @@ export async function buildContext(env: Env, event: AnnounceEvent): Promise<Anno
 					authors: (meta.authors ?? []).map((a) => a.name).filter(Boolean),
 				}
 			: undefined,
-		chapterOrder: chapter?.order,
-		chapterTitle: chapter?.title,
-		topics: chapter ? buildTopics(chapter.topics, claims, chapter.order, directory) : [],
+		chapterOrder: chapters[0]?.order,
+		chapterTitle: chapters.length === 1 ? chapters[0]?.title : undefined,
+		chapters,
+		topics: chapters.flatMap((c) => c.topics),
 		directory,
 	};
 }

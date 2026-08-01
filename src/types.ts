@@ -66,13 +66,30 @@ export interface ClosedChapterEvent extends EventBase {
 	notes_board_url?: string;
 }
 
+/**
+ * Блок программы эфира: глава книги и темы из неё. Пустой `topic_ids` —
+ * вся глава. Блоков может быть несколько: на одном стриме разбирают
+ * несколько глав или даже книг.
+ */
+export interface ProgramBlock {
+	book_id: string;
+	chapter: string;
+	topic_ids?: string[];
+}
+
 /** «Доклады» — чистовая запись докладов (стримы, без Meet). */
 export interface LiveTalkEvent extends EventBase {
 	type: "live-talk";
 	talks: { title: string; speaker: string; speaker_id?: string; topic_id?: string }[];
-	/** Книга и глава программы докладов. */
+	/**
+	 * Программа эфира блоками. Старые встречи её не имеют — там книга и глава
+	 * лежат прямо в событии (`book_id`/`chapter`/`topic_ids`), и это тот же
+	 * единственный блок: разбирать оба вида должен `eventProgram()`.
+	 */
+	program?: ProgramBlock[];
 	book_id?: string;
 	chapter?: string;
+	topic_ids?: string[];
 }
 
 export type ClubEvent = ClosedChapterEvent | LiveTalkEvent;

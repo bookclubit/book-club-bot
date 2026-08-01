@@ -11,7 +11,7 @@ import {
 	reviewFromQuality,
 	selectDue,
 } from "../src/lib/spaced-repetition";
-import { eventArchived, eventDateFromPath, eventPathById } from "../src/lib/events";
+import { eventArchived, eventDateFromPath, eventPathById, eventProgram } from "../src/lib/events";
 import { renderBack } from "../src/lib/cards";
 import { buildTopics, renderAnnounce, renderDay, renderSoon } from "../src/lib/announce";
 import {
@@ -238,6 +238,81 @@ describe("Встреча прошла: через EVENT_HOURS после нач�
 		expect(eventArchived(noTime, Date.parse("2026-07-31T21:30:00Z"))).toBe(true);
 		// 31 июля 23:30 МСК — ещё её день.
 		expect(eventArchived(noTime, Date.parse("2026-07-31T20:30:00Z"))).toBe(false);
+	});
+});
+
+describe("Программа эфира: несколько глав и книг", () => {
+	const event = {
+		id: "live-2026-08-14-dve-glavy",
+		type: "live-talk" as const,
+		title: "Две главы за вечер",
+		date: "2026-08-14",
+		time: "18:00",
+		talks: [],
+		program: [
+			{ book_id: "fluent-react", chapter: "09-servernye-komponenty-react" },
+			{ book_id: "docker-intro", chapter: "10-monitoring", topic_ids: ["docker-intro-10-1"] },
+		],
+	} as unknown as ClubEvent;
+
+	it("программа берётся из блоков", () => {
+		expect(eventProgram(event)).toHaveLength(2);
+		expect(eventProgram(event)[1].topic_ids).toEqual(["docker-intro-10-1"]);
+	});
+
+	it("старая встреча без program — это тот же один блок", () => {
+		const old = {
+			id: "live-2026-07-24-osnovy",
+			type: "live-talk",
+			title: "Начинаем",
+			date: "2026-07-24",
+			time: "18:00",
+			talks: [],
+			book_id: "ai-engineering",
+			chapter: "01-osnovy",
+			topic_ids: ["ai-1-2"],
+		} as unknown as ClubEvent;
+		expect(eventProgram(old)).toEqual([
+			{ book_id: "ai-engineering", chapter: "01-osnovy", topic_ids: ["ai-1-2"] },
+		]);
+	});
+
+	const ctx = {
+		event: { id: event.id, type: "live-talk" as const, title: event.title, date: event.date, time: event.time },
+		chapters: [
+			{
+				order: 9,
+				title: "Серверные компоненты React",
+				bookTitle: "React. К вершинам мастерства",
+				topics: [
+					{ order: 9, title: "Преимущества", speaker: "Антон Помазков", speakerUrl: "https://t.me/kunjutone" },
+					{ order: 9, title: "Серверные действия" },
+				],
+			},
+			{
+				order: 10,
+				title: "Мониторинг",
+				bookTitle: "Docker. Вводный курс",
+				topics: [{ order: 10, title: "Prometheus", speaker: "Артём" }],
+			},
+		],
+		topics: [],
+	};
+
+	it("задание перечисляет все главы программы", () => {
+		const text = renderAnnounce(ctx);
+		expect(text).toContain(
+			"прочитать главы 9 «Серверные компоненты React» (React. К вершинам мастерства) и 10 «Мониторинг» (Docker. Вводный курс)",
+		);
+	});
+
+	it("темы сгруппированы по главам, нумерация сквозная", () => {
+		const text = renderAnnounce(ctx);
+		expect(text).toContain("React. К вершинам мастерства, глава 9 — Серверные компоненты React:");
+		expect(text).toContain('1. Преимущества — <a href="https://t.me/kunjutone">Антон Помазков</a>');
+		expect(text).toContain("2. Серверные действия — свободно");
+		expect(text).toContain("Docker. Вводный курс, глава 10 — Мониторинг:");
+		expect(text).toContain("3. Prometheus — Артём");
 	});
 });
 

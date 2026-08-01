@@ -64,6 +64,28 @@ export function eventStartMs(event: ClubEvent): number {
 	return Date.parse(`${event.date}T${event.time}:00+03:00`);
 }
 
+/**
+ * Сколько часов после начала встреча считается идущей. Времени окончания
+ * в данных нет, а созвон клуба редко тянется дольше. То же число — в miniapp
+ * (`lib/events.ts`): план на сайте и темы в боте не должны расходиться.
+ */
+export const EVENT_HOURS = 4;
+
+/** Встреча закончилась: прошло EVENT_HOURS с начала (без времени — по дате). */
+export function eventEnded(event: ClubEvent, now = Date.now()): boolean {
+	const start = eventStartMs(event);
+	if (Number.isNaN(start)) return event.date < mskToday(now);
+	return now >= start + EVENT_HOURS * 3600 * 1000;
+}
+
+/**
+ * Встреча прошла: закончилась или админ отметил её завершённой (перенос,
+ * отмена). Флагом можно убрать встречу раньше, но ждать его не нужно.
+ */
+export function eventArchived(event: ClubEvent, now = Date.now()): boolean {
+	return Boolean(event.finished) || eventEnded(event, now);
+}
+
 /** Сообщение со всеми ссылками встречи: созвон, доска, материалы, трансляции. */
 export function renderEventLinks(event: ClubEvent): string {
 	const lines: string[] = [

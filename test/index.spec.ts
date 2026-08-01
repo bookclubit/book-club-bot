@@ -4,14 +4,14 @@ declare module "cloudflare:test" {
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 import worker, { groupCommand } from "../src/index";
-import type { CardProgress, DeckCard, Flashcard } from "../src/types";
+import type { CardProgress, ClubEvent, DeckCard, Flashcard } from "../src/types";
 import {
 	calculateNextReview,
 	initialProgress,
 	reviewFromQuality,
 	selectDue,
 } from "../src/lib/spaced-repetition";
-import { eventDateFromPath, eventPathById } from "../src/lib/events";
+import { eventArchived, eventDateFromPath, eventPathById } from "../src/lib/events";
 import { renderBack } from "../src/lib/cards";
 import { buildTopics, renderAnnounce, renderDay, renderSoon } from "../src/lib/announce";
 import {
@@ -204,6 +204,40 @@ describe("events: id ↔ путь файла", () => {
 
 	it("дата из пути события", () => {
 		expect(eventDateFromPath("live-talks/2026-07-25-docker-doklady.json")).toBe("2026-07-25");
+	});
+});
+
+describe("Встреча прошла: через EVENT_HOURS после начала", () => {
+	const event = {
+		id: "live-2026-07-31-glava-9",
+		type: "live-talk",
+		title: "Серверные компоненты React",
+		date: "2026-07-31",
+		time: "23:00",
+		timezone: "Europe/Moscow",
+		talks: [],
+	} as unknown as ClubEvent;
+	// Начало — 23:00 МСК = 20:00 UTC.
+	const start = Date.parse("2026-07-31T20:00:00Z");
+
+	it("во время встречи — ещё не прошла", () => {
+		expect(eventArchived(event, start + 3 * 3600 * 1000)).toBe(false);
+	});
+
+	it("через 4 часа после начала — прошла, флаг админа не нужен", () => {
+		expect(eventArchived(event, start + 4 * 3600 * 1000)).toBe(true);
+	});
+
+	it("флаг finished отправляет в архив сразу", () => {
+		expect(eventArchived({ ...event, finished: true }, start - 3600 * 1000)).toBe(true);
+	});
+
+	it("без времени начала — по дате, на следующий день", () => {
+		const noTime = { ...event, time: "" } as unknown as ClubEvent;
+		// 1 августа 00:30 МСК — дата встречи уже позади.
+		expect(eventArchived(noTime, Date.parse("2026-07-31T21:30:00Z"))).toBe(true);
+		// 31 июля 23:30 МСК — ещё её день.
+		expect(eventArchived(noTime, Date.parse("2026-07-31T20:30:00Z"))).toBe(false);
 	});
 });
 

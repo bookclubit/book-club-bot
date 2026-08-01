@@ -3,7 +3,7 @@
 
 import type { TopicRef } from "../types";
 import { fetchChapter, fetchEventByPath, fetchIndex } from "./api";
-import { eventDateFromPath, mskToday } from "./events";
+import { eventArchived, eventDateFromPath, mskToday } from "./events";
 
 export interface PlanTopic {
 	topic: TopicRef;
@@ -14,13 +14,16 @@ export interface PlanTopic {
 
 export async function fetchPlanTopics(): Promise<PlanTopic[]> {
 	const index = await fetchIndex();
-	const today = mskToday();
+	// По дате отбираем с запасом на день: встреча вечера предыдущей даты может
+	// идти после полуночи, а прошла она или нет — решает `eventArchived` ниже
+	// (у пути есть только дата, времени в нём нет).
+	const from = mskToday(Date.now() - 24 * 3600 * 1000);
 
-	// Только «доклады» (live-talks) в будущем: именно на них берут темы.
+	// Только «доклады» (live-talks): именно на них берут темы.
 	const planPaths = index.events
 		.filter((p) => p.startsWith("live-talks/"))
 		.map((p) => ({ p, date: eventDateFromPath(p) ?? "" }))
-		.filter((e) => e.date >= today)
+		.filter((e) => e.date >= from)
 		.sort((a, b) => a.date.localeCompare(b.date))
 		.map((e) => e.p);
 	if (planPaths.length === 0) return [];
@@ -30,6 +33,8 @@ export async function fetchPlanTopics(): Promise<PlanTopic[]> {
 	for (const path of planPaths) {
 		const event = await fetchEventByPath(path);
 		if (!event?.book_id || !event.chapter) continue;
+		// Прошедший эфир тем не даёт — то же правило, что в плане на сайте.
+		if (eventArchived(event)) continue;
 		const book =
 			index.books.find((b) => b.id === event.book_id) ??
 			index.books.find((b) => b.folder === event.book_id);

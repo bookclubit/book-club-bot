@@ -448,7 +448,8 @@ export async function updateSpeakerClaim(
 
 /**
  * Админ назначает спикера на тему из CMS — создаёт/заменяет подтверждённую
- * заявку в D1 (единый источник занятости). chat_id=0: заявка не от Telegram.
+ * заявку в D1 (единый источник занятости). chat_id=0 — Telegram спикера
+ * неизвестен: писать ему бот не сможет (см. findSpeakerChat).
  */
 export async function assignClaim(
 	db: D1Database,
@@ -459,6 +460,8 @@ export async function assignClaim(
 		chapter: string;
 		speakerId: string;
 		speakerName: string;
+		chatId?: number;
+		username?: string | null;
 	},
 ): Promise<void> {
 	await ensureSchema(db);
@@ -467,19 +470,77 @@ export async function assignClaim(
 	await db
 		.prepare(
 			`INSERT INTO speaker_claims
-				(topic_id, topic_title, book_id, chapter, chat_id, full_name, speaker_id, status, created_at)
-			 VALUES (?, ?, ?, ?, 0, ?, ?, 'confirmed', ?)`,
+				(topic_id, topic_title, book_id, chapter, chat_id, username, full_name, speaker_id, status, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?)`,
 		)
 		.bind(
 			claim.topicId,
 			claim.topicTitle,
 			claim.bookId,
 			claim.chapter,
+			claim.chatId ?? 0,
+			claim.username ?? null,
 			claim.speakerName,
 			claim.speakerId,
 			Date.now(),
 		)
 		.run();
+}
+
+/** Дописывает в заявку Telegram спикера, когда его нашли позже. */
+export async function setClaimContact(
+	db: D1Database,
+	topicId: string,
+	chatId: number,
+	username?: string | null,
+): Promise<void> {
+	await ensureSchema(db);
+	await db
+		.prepare("UPDATE speaker_claims SET chat_id = ?, username = COALESCE(?, username) WHERE topic_id = ?")
+		.bind(chatId, username ?? null, topicId)
+		.run();
+}
+
+/**
+ * Telegram каталожного спикера. Заявку, назначенную админом в CMS, создаёт не
+ * человек, а админ — chat_id в ней 0, и без такого поиска бот молчал бы
+ * (спикер не узнавал бы ни о теме, ни о готовой презентации). Ищем по
+ * устойчивой личности, прошлым заявкам и аккаунтам платформы (вход в miniapp).
+ */
+export async function findSpeakerChat(
+	db: D1Database,
+	speakerId: string,
+	username?: string | null,
+): Promise<{ chatId: number; username: string | null } | null> {
+	await ensureSchema(db);
+
+	const identity = await db
+		.prepare(
+			`SELECT chat_id, username FROM speaker_identity
+			 WHERE speaker_id = ? AND chat_id != 0 ORDER BY updated_at DESC LIMIT 1`,
+		)
+		.bind(speakerId)
+		.first<{ chat_id: number; username: string | null }>();
+	if (identity) return { chatId: identity.chat_id, username: identity.username };
+
+	const claim = await db
+		.prepare(
+			`SELECT chat_id, username FROM speaker_claims
+			 WHERE speaker_id = ? AND chat_id != 0 ORDER BY created_at DESC LIMIT 1`,
+		)
+		.bind(speakerId)
+		.first<{ chat_id: number; username: string | null }>();
+	if (claim) return { chatId: claim.chat_id, username: claim.username };
+
+	// Тему мог получить человек, который сам боту ещё не писал, но входил
+	// в приложение: аккаунт платформы = тот же Telegram id.
+	const handle = username?.replace(/^@/, "").toLowerCase();
+	if (!handle) return null;
+	const user = await db
+		.prepare("SELECT id, username FROM users WHERE lower(username) = ?")
+		.bind(handle)
+		.first<{ id: number; username: string | null }>();
+	return user ? { chatId: user.id, username: user.username } : null;
 }
 
 /** Освобождает тему — удаляет заявку по topic_id (единый рычаг для CMS/бота). */

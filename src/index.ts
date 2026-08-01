@@ -41,6 +41,7 @@ import {
 	removeAnnounceChat,
 	saveCardProgress,
 	saveMembershipRequest,
+	setClaimContact,
 	setClaimSlides,
 	setDailyCards,
 	setMembershipStatus,
@@ -51,7 +52,7 @@ import {
 	upsertUser,
 	wasReminderSent,
 } from "./lib/db";
-import { speakerAccess } from "./lib/members";
+import { speakerAccess, speakerChat } from "./lib/members";
 import { fetchPlanTopics } from "./lib/plan";
 import {
 	getDraftPoster,
@@ -401,6 +402,9 @@ async function handleAdminDecision(env: Env, request: Request): Promise<Response
 		if (!body.topic_id || !body.topic_title || !body.book_id || !body.chapter || !body.speaker_id || !body.speaker_name) {
 			return json({ error: "нужны topic_id, topic_title, book_id, chapter, speaker_id, speaker_name" }, 400);
 		}
+		// Telegram спикера ищем сразу: заявку создаёт админ, а писать спикеру
+		// (например, о готовой презентации) бот должен уметь и по ней.
+		const contact = await speakerChat(env, body.speaker_id);
 		await assignClaim(env.BOOK_CLUB_DB, {
 			topicId: body.topic_id,
 			topicTitle: body.topic_title,
@@ -408,8 +412,10 @@ async function handleAdminDecision(env: Env, request: Request): Promise<Response
 			chapter: body.chapter,
 			speakerId: body.speaker_id,
 			speakerName: body.speaker_name,
+			chatId: contact?.chatId,
+			username: contact?.username,
 		});
-		return json({ ok: true });
+		return json({ ok: true, known: Boolean(contact) });
 	}
 	if (body.action === "release") {
 		if (!body.topic_id) return json({ error: "нужен topic_id" }, 400);
@@ -421,10 +427,22 @@ async function handleAdminDecision(env: Env, request: Request): Promise<Response
 		await setClaimSlides(env.BOOK_CLUB_DB, body.topic_id, body.slides_url);
 		// Сообщаем спикеру: презентация генерируется — ссылка на PR + инструкция.
 		const claim = await getClaimByTopic(env.BOOK_CLUB_DB, body.topic_id);
-		if (claim?.chat_id) {
-			await sendMessage(env.BOT_TOKEN, claim.chat_id, talkReadyMessage(env, body.slides_url));
+		// Тему назначил админ в CMS → в заявке нет chat_id: ищем Telegram спикера
+		// и дописываем в заявку, иначе спикер о презентации не узнает.
+		let chatId = claim?.chat_id ?? 0;
+		if (!chatId && claim?.speaker_id) {
+			const contact = await speakerChat(env, claim.speaker_id);
+			if (contact) {
+				chatId = contact.chatId;
+				await setClaimContact(env.BOOK_CLUB_DB, body.topic_id, contact.chatId, contact.username);
+			}
 		}
-		return json({ ok: true });
+		if (chatId) {
+			await sendMessage(env.BOT_TOKEN, chatId, talkReadyMessage(env, body.slides_url));
+		}
+		// notified=false — бот не знает Telegram спикера; CMS попросит админа
+		// написать самому, а не оставит его в уверенности, что спикер уведомлён.
+		return json({ ok: true, notified: Boolean(chatId) });
 	}
 
 	// Модерация заявок бота — по id заявки, с уведомлением спикера.

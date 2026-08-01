@@ -31,6 +31,8 @@ import {
 	cardKey,
 	createSpeakerClaim,
 	deleteSpeakerClaim,
+	findSpeakerChat,
+	getClaimByTopic,
 	getPostDraft,
 	getSpeakerProfile,
 	listAnnounceChats,
@@ -51,6 +53,8 @@ import {
 	setPostDraftPoster,
 	setPostDraftSchedule,
 	setPostDraftText,
+	updateSpeakerClaim,
+	upsertUser,
 	type MembershipRequest,
 } from "../src/lib/db";
 import { speakerAccess } from "../src/lib/members";
@@ -1021,6 +1025,58 @@ describe("Участие в клубе: темы берут только уча�
 		// Принятого участника случайный повтор заявки не лишает доступа.
 		await saveMembershipRequest(db, { chatId, about: "ещё раз", source: "bot" });
 		expect((await speakerAccess(env, chatId)).registered).toBe(true);
+	});
+
+	it("Telegram спикера находится, даже если тему назначил админ в CMS", async () => {
+		resetSchemaCacheForTests();
+		const db = env.BOOK_CLUB_DB;
+
+		// 1. Устойчивая личность: спикер когда-то брал тему у бота.
+		await saveSpeakerIdentity(db, {
+			chatId: 909101,
+			speakerId: "identity-speaker",
+			fullName: "Иван Личность",
+			username: "ivan_identity",
+		});
+		expect(await findSpeakerChat(db, "identity-speaker")).toEqual({
+			chatId: 909101,
+			username: "ivan_identity",
+		});
+
+		// 2. Прошлая заявка из Telegram (легаси до speaker_identity).
+		const legacy = await createSpeakerClaim(db, {
+			topicId: "legacy-topic",
+			topicTitle: "Старый доклад",
+			chatId: 909102,
+			username: "old_speaker",
+		});
+		await updateSpeakerClaim(db, legacy!.id, { speakerId: "legacy-speaker" });
+		expect((await findSpeakerChat(db, "legacy-speaker"))?.chatId).toBe(909102);
+
+		// 3. Ни разу не писал боту, но входил в приложение — ищем по нику каталога.
+		await upsertUser(db, { id: 909103, username: "MiniappOnly" });
+		expect((await findSpeakerChat(db, "miniapp-speaker", "@miniappOnly"))?.chatId).toBe(909103);
+
+		// Незнакомый спикер — писать некуда, и это честно видно вызывающему.
+		expect(await findSpeakerChat(db, "unknown-speaker", "nobody_here")).toBeNull();
+	});
+
+	it("назначение из CMS запоминает Telegram спикера в заявке", async () => {
+		resetSchemaCacheForTests();
+		const db = env.BOOK_CLUB_DB;
+		await assignClaim(db, {
+			topicId: "assign-contact-1",
+			topicTitle: "Серверный рендеринг",
+			bookId: "fluent-react",
+			chapter: "09-react-server-components",
+			speakerId: "contact-speaker",
+			speakerName: "Пётр Контактов",
+			chatId: 909104,
+			username: "petr_contact",
+		});
+		const claim = await getClaimByTopic(db, "assign-contact-1");
+		expect(claim?.chat_id).toBe(909104);
+		expect(claim?.username).toBe("petr_contact");
 	});
 
 	it("спикера, узнанного ранее, заявкой не мучаем", async () => {

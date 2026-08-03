@@ -361,7 +361,9 @@ function talkReadyMessage(env: Env, slides: string): string {
 		`📄 <b>Черновик доклада</b> (pull request):\n<a href="${prLink}">открыть на GitHub</a>\n` +
 		preview +
 		"\n<b>Как собрать презентацию:</b>\n" +
-		`1️⃣ Склонируй ветку черновика:\n<code>git clone -b ${branch} ${talksRepo}.git</code>\n` +
+		// Разреженный клон: скачивается только папка этого доклада (около мегабайта)
+		// вместо всех презентаций клуба — их число растёт с каждым стримом.
+		`1️⃣ Забери только свой доклад (не все презентации клуба):\n<pre>git clone --filter=blob:none --no-checkout --depth 1 \\\n  -b ${branch} ${talksRepo}.git\ncd book-club-talks\ngit sparse-checkout set talks/${branch}\ngit checkout</pre>\n` +
 		`2️⃣ Правь слайды в <code>talks/${branch}/index.html</code>\n` +
 		"3️⃣ <code>git push</code> — превью обновится само, можно сразу смотреть\n" +
 		"4️⃣ Готово? Напиши админу — он смёржит, и доклад встанет на боевую ссылку:\n" +

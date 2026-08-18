@@ -2,6 +2,7 @@
 
 import type { ClubEvent, ContentIndex, ProgramBlock, TopicRef } from "../types";
 import { fetchChapter, fetchEventByPath, fetchIndex } from "./api";
+import { mergeTalkTopics } from "./topics";
 
 /**
  * id события кодирует путь файла: `<prefix>-<date>-<slug>` →
@@ -74,9 +75,13 @@ export async function fetchEventProgram(event: ClubEvent): Promise<ProgramChapte
 		if (!folder) continue;
 		const chapter = await fetchChapter(folder, block.chapter);
 		if (!chapter) continue;
-		const picked = block.topic_ids?.length
-			? (chapter.topics ?? []).filter((t) => block.topic_ids!.includes(t.id))
-			: (chapter.topics ?? []);
+		// Объединённые темы — один доклад: дальше по коду (темы для брони, посты,
+		// напоминания) они идут одной строкой через запятую.
+		const picked = mergeTalkTopics(
+			block.topic_ids?.length
+				? (chapter.topics ?? []).filter((t) => block.topic_ids!.includes(t.id))
+				: (chapter.topics ?? []),
+		);
 		loaded.push({
 			bookId: block.book_id,
 			folder,

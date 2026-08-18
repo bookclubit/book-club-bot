@@ -13,6 +13,7 @@ import {
 } from "../src/lib/spaced-repetition";
 import { eventArchived, eventDateFromPath, eventPathById, eventProgram } from "../src/lib/events";
 import { renderBack } from "../src/lib/cards";
+import { mergeTalkTopics } from "../src/lib/topics";
 import { buildTopics, renderAnnounce, renderDay, renderSoon } from "../src/lib/announce";
 import {
 	getDraftPoster,
@@ -317,6 +318,31 @@ describe("Программа эфира: несколько глав и книг
 		expect(text).toContain("2. Серверные действия — свободно");
 		expect(text).toContain("Docker. Вводный курс, глава 10 — Мониторинг:");
 		expect(text).toContain("3. Prometheus — Артём");
+	});
+});
+
+describe("Объединённые темы: несколько тем — один доклад", () => {
+	// CMS помечает группу целиком, включая ведущую тему: ключ — её id.
+	const topics = [
+		{ id: "react-10-1", title: "Vue.js", talk_group: "react-10-1" },
+		{ id: "react-10-2", title: "Angular", talk_group: "react-10-1" },
+		{ id: "react-10-3", title: "Svelte", talk_group: "react-10-1" },
+		{ id: "react-10-4", title: "Qwik" },
+	];
+
+	it("группа склеивается в одну тему с названиями через запятую", () => {
+		expect(mergeTalkTopics(topics)).toEqual([
+			{ id: "react-10-1", title: "Vue.js, Angular, Svelte", talk_group: "react-10-1" },
+			{ id: "react-10-4", title: "Qwik" },
+		]);
+	});
+
+	it("id доклада — id первой темы группы: на него заведена бронь в D1", () => {
+		expect(mergeTalkTopics(topics)[0].id).toBe("react-10-1");
+	});
+
+	it("тема без группы остаётся собой", () => {
+		expect(mergeTalkTopics([topics[3]])).toEqual([{ id: "react-10-4", title: "Qwik" }]);
 	});
 });
 

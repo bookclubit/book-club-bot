@@ -104,6 +104,12 @@ export type AnnounceKind = "announce" | "day" | "soon";
 export interface TopicRef {
 	id: string;
 	title: string;
+	/**
+	 * Темы одного доклада: общий id ведущей темы группы. Спикер берёт несколько
+	 * тем подряд и рассказывает их вместе — для бота это одна тема с названием
+	 * через запятую (см. `mergeTalkTopics` в lib/topics.ts).
+	 */
+	talk_group?: string;
 }
 
 /** Мета книги (meta.json) — для постов о встрече нужны название, авторы, ссылка. */

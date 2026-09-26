@@ -1,18 +1,13 @@
 // Алгоритм интервального повторения SM-2 (SuperMemo 2).
 // https://super-memory.com/english/ol/sm2.htm
+// Карточки повторяют в приложении клуба, оценки приходят в POST /api/review —
+// единый расчёт здесь, прогресс в D1.
 
-import type { CardProgress, Grade } from "../types";
+import type { CardProgress } from "../types";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MIN_EASINESS = 1.3;
 const DEFAULT_EASINESS = 2.5;
-
-/** Оценка пользователя → качество ответа q (0–5) в терминах SM-2. */
-const GRADE_QUALITY: Record<Grade, number> = {
-	again: 1, // Забыл
-	hard: 3, // Сложно
-	easy: 5, // Легко
-};
 
 /** Начальный прогресс для ещё не изучавшейся карточки (подлежит повторению сразу). */
 export function initialProgress(cardId: string, now: number): CardProgress {
@@ -27,23 +22,8 @@ export function initialProgress(cardId: string, now: number): CardProgress {
 }
 
 /**
- * Рассчитывает новое состояние карточки по SM-2 после оценки.
- * @param prev текущий прогресс (или undefined для новой карточки)
- * @param grade оценка пользователя
- * @param now текущее время, epoch ms
- */
-export function calculateNextReview(
-	prev: CardProgress | undefined,
-	grade: Grade,
-	now: number,
-): CardProgress {
-	return reviewFromQuality(prev, GRADE_QUALITY[grade], now);
-}
-
-/**
- * Расчёт SM-2 по числовому качеству ответа q (0–5) — общий для бота (3 оценки)
- * и сайта (4 оценки: again/hard/good/easy). Позволяет считать интервалы
- * одинаково независимо от источника оценки.
+ * Расчёт SM-2 по качеству ответа q (0–5). Оценки сайта (again/hard/good/easy)
+ * переводятся в q в POST /api/review.
  */
 export function reviewFromQuality(
 	prev: CardProgress | undefined,
@@ -84,37 +64,4 @@ export function reviewFromQuality(
 		dueDate: now + interval * DAY_MS,
 		lastReviewed: now,
 	};
-}
-
-/**
- * Выбирает элементы, подлежащие повторению: новые (без прогресса) и
- * просроченные (dueDate <= now) — по возрастанию dueDate (сначала самые
- * «просроченные» и новые). Параметризована ключом прогресса, поэтому работает
- * и с карточками одной книги (ключ — id), и с колодой по всем книгам клуба
- * (композитный ключ «<book>:<cardId>»).
- * @param items карточки (или обёртки над ними)
- * @param keyOf ключ элемента в map прогресса
- * @param progress map ключ → прогресс
- * @param now текущее время, epoch ms
- * @param limit максимум элементов
- */
-export function selectDue<T>(
-	items: T[],
-	keyOf: (item: T) => string,
-	progress: Map<string, CardProgress>,
-	now: number,
-	limit: number,
-): T[] {
-	const due = items.filter((item) => {
-		const p = progress.get(keyOf(item));
-		return !p || p.dueDate <= now;
-	});
-
-	due.sort((a, b) => {
-		const da = progress.get(keyOf(a))?.dueDate ?? 0;
-		const db = progress.get(keyOf(b))?.dueDate ?? 0;
-		return da - db;
-	});
-
-	return due.slice(0, limit);
 }

@@ -1,7 +1,8 @@
 /**
  * «Книжный клуб» — телеграм-бот книжного клуба для фронтендеров.
- * Cloudflare Worker: вебхук Telegram + cron (карточки и напоминания) +
- * небольшое HTTP API для miniapp (занятость тем) и CMS (модерация заявок).
+ * Cloudflare Worker: вебхук Telegram + cron (напоминания о карточках и встречах,
+ * посты) + HTTP API для miniapp (вход, колода, прогресс, статистика, занятость
+ * тем) и CMS (модерация заявок, посты).
  */
 
 import type { TelegramMessage, TelegramUpdate } from "./types";
@@ -16,35 +17,41 @@ import {
 } from "./lib/auth";
 import {
 	addAnnounceChat,
+	addDeckBook,
 	assignClaim,
 	cardKey,
 	createSpeakerClaim,
 	deletePostDraft,
-	DAILY_CARD_OPTIONS,
 	deleteSpeakerClaim,
+	getBotSetting,
 	getCardProgress,
 	getCardProgressMap,
 	getClaimByTopic,
-	getDailyCards,
+	getDeck,
 	getMembershipRequestById,
 	getPostDraft,
 	getSpeakerClaim,
 	getUser,
+	importCardProgress,
 	listAnnounceChats,
 	listMembershipRequests,
 	listPostDrafts,
 	listRegistrations,
 	listSpeakerClaims,
+	logReview,
 	markReminderSent,
 	MAX_PUBLISH_ATTEMPTS,
+	mergeDeck,
 	releaseClaimByTopic,
 	removeAnnounceChat,
+	removeDeckBook,
 	saveCardProgress,
 	saveMembershipRequest,
+	setBotSetting,
 	setClaimContact,
 	setClaimSlides,
-	setDailyCards,
 	setMembershipStatus,
+	type DbUser,
 	setPostDraftApproved,
 	setPostDraftSchedule,
 	setPostDraftText,
@@ -66,11 +73,14 @@ import {
 } from "./lib/announcer";
 import { KIND_INFO, type AnnounceEvent } from "./lib/announce";
 import { miniappUrl } from "./lib/urls";
-import type { AnnounceKind } from "./types";
+import type { AnnounceKind, CardProgress } from "./types";
 import { initialProgress, reviewFromQuality } from "./lib/spaced-repetition";
-import { startStudy } from "./lib/study";
 import { eventDateFromPath, eventStartMs, mskToday, renderEventLinks } from "./lib/events";
-import { deleteSubscriber, listSubscribers } from "./lib/storage";
+import { deleteSubscriber } from "./lib/storage";
+import { FOLDER_RE, parseDeck } from "./lib/deck";
+import { loadUserStats } from "./lib/learning";
+import { checkLogin, isLoginCode, isLoginSecret, LOGIN_START_PREFIX, startLogin } from "./lib/login";
+import { runCardReminders } from "./lib/reminders";
 import {
 	getFileResponse,
 	isChatAdmin,
@@ -88,15 +98,12 @@ import {
 	handleSpeaker,
 	notifyAdminMembership,
 } from "./handlers/registration";
+import { handleLoginStart } from "./handlers/login";
 import { handleStart } from "./commands/start";
 import { handleStop } from "./commands/stop";
 import { handleToday } from "./commands/today";
 import { handleStatus } from "./commands/status";
-import { handleSettings } from "./commands/settings";
 import { handleHelp } from "./commands/help";
-
-const MORNING_INTRO =
-	"☀️ <b>Доброе утро!</b> Карточки на сегодня для повторения:";
 
 const UNKNOWN_COMMAND =
 	"Не знаю такой команды 🤔\n\nСписок всех команд — /help";
@@ -202,13 +209,17 @@ async function routeMessage(env: Env, message: TelegramMessage): Promise<void> {
 	switch (command) {
 		case "start": {
 			// Диплинки: /start join_<eventId> — запись на встречу,
-			// /start speaker[_...] — заявка на доклад (глобальная).
+			// /start speaker[_...] — заявка на доклад (глобальная),
+			// /start login_<code> — вход на сайт (кнопка «Войти через Telegram»).
 			const payload = text.split(/\s+/)[1] ?? "";
 			if (payload.startsWith("join_")) {
 				return handleJoin(env, message, payload.slice("join_".length));
 			}
 			if (payload === "speaker" || payload.startsWith("speaker_")) {
 				return handleSpeaker(env, message);
+			}
+			if (payload.startsWith(LOGIN_START_PREFIX)) {
+				return handleLoginStart(env, message, payload.slice(LOGIN_START_PREFIX.length));
 			}
 			return handleStart(env, message);
 		}
@@ -222,8 +233,6 @@ async function routeMessage(env: Env, message: TelegramMessage): Promise<void> {
 			return handleToday(env, message);
 		case "status":
 			return handleStatus(env, message);
-		case "settings":
-			return handleSettings(env, message);
 		case "help":
 			return handleHelp(env, message);
 		case "anons_here":
@@ -502,27 +511,52 @@ async function handleAdminPhoto(env: Env, url: URL): Promise<Response> {
 }
 
 /** Команды бота для меню Telegram. Единственный источник списка. */
-const BOT_COMMANDS = [
-	{ command: "today", description: "Начать повторение карточек" },
+export const BOT_COMMANDS = [
+	{ command: "today", description: "Что сейчас ждёт повторения" },
 	{ command: "status", description: "Статистика изучения" },
-	{ command: "settings", description: "Сколько карточек в день" },
 	{ command: "speaker", description: "Выступить с докладом или вступить в клуб" },
 	{ command: "cancel", description: "Прервать заявку" },
 	{ command: "help", description: "Помощь и список команд" },
 	{ command: "anons_here", description: "Подключить этот чат к постам о встречах (админ)" },
 	{ command: "anons_stop", description: "Отключить посты о встречах в этом чате (админ)" },
-	{ command: "start", description: "Подписка на ежедневные карточки" },
-	{ command: "stop", description: "Отписаться от карточек" },
+	{ command: "start", description: "Включить напоминания о карточках" },
+	{ command: "stop", description: "Выключить напоминания" },
 ];
 
-/**
- * Настройка бота: POST /api/admin/setup — регистрирует команды меню и кнопку
- * «Открыть приложение» (Mini App). Вызывать после изменения набора команд.
- */
-async function handleAdminSetup(env: Env): Promise<Response> {
+const MENU_BUTTON_TEXT = "🗂 Приложение";
+/** Где помним, какой набор команд и кнопку меню Telegram уже знает. */
+const BOT_SETUP_KEY = "bot_setup";
+
+/** Слепок того, что регистрируем в Telegram: команды и кнопка меню. */
+const setupSignature = (env: Env): string =>
+	JSON.stringify({ commands: BOT_COMMANDS, menu: [MENU_BUTTON_TEXT, miniappUrl(env)] });
+
+/** Регистрирует команды меню и кнопку «Приложение» (Mini App) в Telegram. */
+async function applyBotSetup(env: Env): Promise<string> {
 	const url = miniappUrl(env);
 	await setMyCommands(env.BOT_TOKEN, BOT_COMMANDS);
-	await setChatMenuButton(env.BOT_TOKEN, "🗂 Приложение", url);
+	await setChatMenuButton(env.BOT_TOKEN, MENU_BUTTON_TEXT, url);
+	await setBotSetting(env.BOOK_CLUB_DB, BOT_SETUP_KEY, setupSignature(env));
+	return url;
+}
+
+/**
+ * Меню Telegram само догоняет код: cron сверяет набор команд с тем, что
+ * регистрировали в прошлый раз, и при расхождении регистрирует заново. Иначе
+ * после деплоя надо было не забыть вызвать /api/admin/setup вручную.
+ */
+async function ensureBotSetup(env: Env): Promise<void> {
+	if ((await getBotSetting(env.BOOK_CLUB_DB, BOT_SETUP_KEY)) === setupSignature(env)) return;
+	await applyBotSetup(env);
+	console.log("Меню бота обновлено в Telegram");
+}
+
+/**
+ * Настройка бота вручную: POST /api/admin/setup — то же, что делает cron
+ * (ensureBotSetup), но сразу.
+ */
+async function handleAdminSetup(env: Env): Promise<Response> {
+	const url = await applyBotSetup(env);
 	return json({ ok: true, commands: BOT_COMMANDS.map((c) => c.command), menu_button: url });
 }
 
@@ -903,7 +937,7 @@ async function handleAdminMemberDecision(env: Env, request: Request): Promise<Re
 
 // ── Платформа: вход через Telegram и единый прогресс карточек ─────────────────
 
-/** Оценка сайта (4 варианта) и бота → качество ответа q (0–5) в SM-2. */
+/** Оценка карточки на сайте (4 варианта) → качество ответа q (0–5) в SM-2. */
 const PLATFORM_QUALITY: Record<string, number> = { again: 1, hard: 3, good: 4, easy: 5 };
 
 function publicUser(u: TgUser): Record<string, unknown> {
@@ -965,26 +999,157 @@ async function handleProgress(env: Env, userId: number): Promise<Response> {
 	return json({ progress: [...map.values()] });
 }
 
-/** Настройки пользователя: GET /api/settings. */
-async function handleGetSettings(env: Env, userId: number): Promise<Response> {
-	const daily = await getDailyCards(env.BOOK_CLUB_DB, userId);
-	return json({ daily_cards: daily, options: DAILY_CARD_OPTIONS });
+/** Профиль из D1 — в том же виде, что после входа по initData. */
+function dbUserPublic(u: DbUser): Record<string, unknown> {
+	return {
+		id: u.id,
+		username: u.username,
+		first_name: u.first_name,
+		last_name: u.last_name,
+		photo_url: u.photo_url,
+	};
 }
 
-/** Изменение настроек: POST /api/settings { daily_cards }. */
-async function handleSetSettings(env: Env, userId: number, request: Request): Promise<Response> {
-	let body: { daily_cards?: number };
+/**
+ * Вход через бота, шаг 1: POST /api/auth/bot → { code, secret }. Сайт ведёт
+ * человека в t.me/<бот>?start=login_<code> и опрашивает /api/auth/bot/check.
+ */
+async function handleBotLoginStart(env: Env): Promise<Response> {
+	return json(await startLogin(env.BOOK_CLUB_DB));
+}
+
+/**
+ * Вход через бота, шаг 2: POST /api/auth/bot/check { code, secret }.
+ * pending — ждём кнопку в боте; ok — сессия (один раз); 410 — заявка
+ * устарела или уже использована; 403 — чужой secret.
+ */
+async function handleBotLoginCheck(env: Env, request: Request): Promise<Response> {
+	let body: { code?: string; secret?: string };
 	try {
 		body = (await request.json()) as typeof body;
 	} catch {
 		return json({ error: "невалидный JSON" }, 400);
 	}
-	const n = Number(body.daily_cards);
-	if (!DAILY_CARD_OPTIONS.includes(n)) {
-		return json({ error: `daily_cards ∈ ${DAILY_CARD_OPTIONS.join(", ")}` }, 400);
+	const code = body.code ?? "";
+	const secret = body.secret ?? "";
+	if (!isLoginCode(code) || !isLoginSecret(secret)) return json({ error: "нужны code и secret" }, 400);
+
+	const check = await checkLogin(env.BOOK_CLUB_DB, code, secret);
+	if (check.status === "pending") return json({ status: "pending" });
+	if (check.status === "denied") return json({ status: "denied" }, 403);
+	if (check.status === "expired") return json({ status: "expired" }, 410);
+
+	const user = await getUser(env.BOOK_CLUB_DB, check.userId);
+	if (!user) return json({ status: "expired" }, 410);
+	const token = await mintSession(env.BOT_TOKEN, user.id);
+	return json({ status: "ok", token, user: dbUserPublic(user) });
+}
+
+/** Колода: GET /api/deck → { deck }. */
+async function handleGetDeck(env: Env, userId: number): Promise<Response> {
+	return json({ deck: await getDeck(env.BOOK_CLUB_DB, userId) });
+}
+
+/**
+ * Изменение колоды: POST /api/deck
+ *   { action: "add" | "remove", book }        — книга целиком
+ *   { action: "merge", books, chapters }       — колода с устройства (при первом входе)
+ * Отвечает колодой после изменения.
+ */
+async function handleSetDeck(env: Env, userId: number, request: Request): Promise<Response> {
+	let body: { action?: string; book?: string; books?: unknown; chapters?: unknown };
+	try {
+		body = (await request.json()) as typeof body;
+	} catch {
+		return json({ error: "невалидный JSON" }, 400);
 	}
-	await setDailyCards(env.BOOK_CLUB_DB, userId, n);
-	return json({ daily_cards: n });
+	const db = env.BOOK_CLUB_DB;
+	if (body.action === "add" || body.action === "remove") {
+		const book = body.book ?? "";
+		if (!FOLDER_RE.test(book)) return json({ error: "book — папка книги" }, 400);
+		if (body.action === "add") await addDeckBook(db, userId, book);
+		else await removeDeckBook(db, userId, book);
+	} else if (body.action === "merge") {
+		await mergeDeck(db, userId, parseDeck(body));
+	} else {
+		return json({ error: "action: add | remove | merge" }, 400);
+	}
+	return json({ deck: await getDeck(db, userId) });
+}
+
+/** Статистика изучения (та же, что /status в боте): GET /api/stats. */
+async function handleStats(env: Env, userId: number): Promise<Response> {
+	return json({ stats: await loadUserStats(env.BOOK_CLUB_DB, userId) });
+}
+
+/** Сколько карточек можно перенести за раз: у клуба их десятки, запас большой. */
+const IMPORT_LIMIT = 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const YEAR_MS = 365 * DAY_MS;
+
+/** Прогресс карточки с устройства — проверяем всё: пишем его в общий прогресс. */
+function parseImportItem(
+	raw: unknown,
+	now: number,
+): { bookId: string; progress: CardProgress } | null {
+	const x = (raw ?? {}) as Record<string, unknown>;
+	const bookId = typeof x.book_id === "string" ? x.book_id : "";
+	const cardId = typeof x.card_id === "string" ? x.card_id : "";
+	const n = (key: string, min: number, max: number): number | null => {
+		const v = Number(x[key]);
+		return Number.isFinite(v) && v >= min && v <= max ? v : null;
+	};
+	const repetition = n("repetition", 0, 1000);
+	const interval = n("interval", 0, 100 * 365);
+	const easiness = n("easiness", 1.3, 5);
+	const dueDate = n("due_date", 0, now + 100 * YEAR_MS);
+	// Часы устройства могут спешить: запас в сутки, дальше — явная ошибка данных.
+	const lastReviewed = n("last_reviewed", 0, now + DAY_MS);
+	if (
+		!FOLDER_RE.test(bookId) ||
+		!/^[\w.-]{1,100}$/.test(cardId) ||
+		repetition === null ||
+		interval === null ||
+		easiness === null ||
+		dueDate === null ||
+		lastReviewed === null
+	) {
+		return null;
+	}
+	return {
+		bookId,
+		progress: {
+			cardId: cardKey(bookId, cardId),
+			repetition: Math.round(repetition),
+			interval: Math.round(interval),
+			easiness,
+			dueDate,
+			lastReviewed,
+		},
+	};
+}
+
+/**
+ * Прогресс гостевого режима сайта — в аккаунт при первом входе:
+ * POST /api/progress/import { items: [{ book_id, card_id, repetition,
+ * interval, easiness, due_date, last_reviewed }] }. Карточки, по которым
+ * у сервера уже есть прогресс, не трогаем.
+ */
+async function handleImportProgress(env: Env, userId: number, request: Request): Promise<Response> {
+	let body: { items?: unknown };
+	try {
+		body = (await request.json()) as typeof body;
+	} catch {
+		return json({ error: "невалидный JSON" }, 400);
+	}
+	if (!Array.isArray(body.items)) return json({ error: "items — список карточек" }, 400);
+	const now = Date.now();
+	const items = body.items
+		.slice(0, IMPORT_LIMIT)
+		.map((item) => parseImportItem(item, now))
+		.filter((item) => item !== null);
+	const imported = await importCardProgress(env.BOOK_CLUB_DB, userId, items);
+	return json({ imported });
 }
 
 /** Оценка карточки: POST /api/review { card_id, book_id, grade }. */
@@ -1007,8 +1172,11 @@ async function handleReview(env: Env, userId: number, request: Request): Promise
 	const now = Date.now();
 	const prev =
 		(await getCardProgress(env.BOOK_CLUB_DB, userId, key)) ?? initialProgress(key, now);
-	const next = reviewFromQuality(prev, PLATFORM_QUALITY[grade], now);
+	const quality = PLATFORM_QUALITY[grade];
+	const next = reviewFromQuality(prev, quality, now);
 	await saveCardProgress(env.BOOK_CLUB_DB, userId, bookId, next);
+	// Журнал — для статистики: активность по дням, серия, точность.
+	await logReview(env.BOOK_CLUB_DB, userId, key, bookId, quality, now);
 	return json({ progress: next });
 }
 
@@ -1038,11 +1206,19 @@ async function routeApi(env: Env, request: Request, url: URL): Promise<Response>
 	if (url.pathname === "/api/auth/telegram" && request.method === "POST") {
 		return handleAuthTelegram(env, request);
 	}
+	if (url.pathname === "/api/auth/bot" && request.method === "POST") {
+		return handleBotLoginStart(env);
+	}
+	if (url.pathname === "/api/auth/bot/check" && request.method === "POST") {
+		return handleBotLoginCheck(env, request);
+	}
 	if (
 		url.pathname === "/api/me" ||
 		url.pathname === "/api/progress" ||
+		url.pathname === "/api/progress/import" ||
 		url.pathname === "/api/review" ||
-		url.pathname === "/api/settings" ||
+		url.pathname === "/api/deck" ||
+		url.pathname === "/api/stats" ||
 		url.pathname === "/api/membership" ||
 		url.pathname === "/api/claim"
 	) {
@@ -1061,14 +1237,20 @@ async function routeApi(env: Env, request: Request, url: URL): Promise<Response>
 		if (url.pathname === "/api/progress" && request.method === "GET") {
 			return handleProgress(env, userId);
 		}
+		if (url.pathname === "/api/progress/import" && request.method === "POST") {
+			return handleImportProgress(env, userId, request);
+		}
 		if (url.pathname === "/api/review" && request.method === "POST") {
 			return handleReview(env, userId, request);
 		}
-		if (url.pathname === "/api/settings" && request.method === "GET") {
-			return handleGetSettings(env, userId);
+		if (url.pathname === "/api/deck" && request.method === "GET") {
+			return handleGetDeck(env, userId);
 		}
-		if (url.pathname === "/api/settings" && request.method === "POST") {
-			return handleSetSettings(env, userId, request);
+		if (url.pathname === "/api/deck" && request.method === "POST") {
+			return handleSetDeck(env, userId, request);
+		}
+		if (url.pathname === "/api/stats" && request.method === "GET") {
+			return handleStats(env, userId);
 		}
 	}
 
@@ -1173,30 +1355,6 @@ async function runTimedReminders(env: Env): Promise<void> {
 	}
 }
 
-/** Пауза между подписчиками рассылки: держит темп ниже лимита ~30 msg/s. */
-const BROADCAST_DELAY_MS = 75;
-
-/** Ежедневная рассылка карточек всем подписчикам. */
-async function runDailyBroadcast(env: Env): Promise<void> {
-	const subscribers = await listSubscribers(env.BOOK_CLUB_KV);
-	console.log(`Ежедневная рассылка: ${subscribers.length} подписчиков`);
-
-	let delivered = 0;
-	for (const sub of subscribers) {
-		try {
-			const sent = await startStudy(env, sub.chatId, { intro: MORNING_INTRO });
-			if (sent > 0) delivered++;
-		} catch (err) {
-			// Ошибка по одному подписчику (например, бот заблокирован) не должна
-			// прерывать рассылку остальным.
-			console.error(`Не удалось отправить карточки ${sub.chatId}:`, err);
-		}
-		// Троттлинг: ожидание через setTimeout не тратит CPU-время воркера.
-		await new Promise((r) => setTimeout(r, BROADCAST_DELAY_MS));
-	}
-	console.log(`Рассылка завершена: карточки получили ${delivered} подписчиков`);
-}
-
 export default {
 	async fetch(request, env, ctx): Promise<Response> {
 		configureApi(env);
@@ -1253,11 +1411,11 @@ export default {
 
 	async scheduled(controller, env, ctx): Promise<void> {
 		configureApi(env);
-		// Ежедневный cron (10:00 МСК): карточки + утренние напоминания.
+		// Ежедневный cron (10:00 МСК): напоминания о карточках и о встречах дня.
 		if (controller.cron === "0 7 * * *") {
 			ctx.waitUntil(
-				runDailyBroadcast(env).catch((err) =>
-					console.error("Ошибка ежедневной рассылки:", err),
+				runCardReminders(env).catch((err) =>
+					console.error("Ошибка напоминаний о карточках:", err),
 				),
 			);
 			ctx.waitUntil(
@@ -1278,6 +1436,9 @@ export default {
 			runScheduledPosts(env).catch((err) =>
 				console.error("Ошибка публикации постов по расписанию:", err),
 			),
+		);
+		ctx.waitUntil(
+			ensureBotSetup(env).catch((err) => console.error("Ошибка регистрации меню бота:", err)),
 		);
 	},
 } satisfies ExportedHandler<Env>;

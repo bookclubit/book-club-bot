@@ -26,12 +26,6 @@ export interface CommandCard extends FlashcardBase {
 
 export type Flashcard = QaCard | CommandCard;
 
-/** Карточка с привязкой к книге (папке) — для колоды по всем книгам клуба. */
-export interface DeckCard {
-	book: string; // имя папки книги в book-club-data
-	card: Flashcard;
-}
-
 // ── События клуба и реестр контента ─────────────────────────────────────────
 
 /** Доп. материал встречи. */
@@ -178,9 +172,6 @@ export interface CardProgress {
 	lastReviewed: number;
 }
 
-/** Оценка ответа пользователем. */
-export type Grade = "again" | "hard" | "easy";
-
 // ── Telegram (минимально необходимые поля) ──────────────────────────────────
 
 export interface TelegramUser {
@@ -235,9 +226,14 @@ export interface TelegramUpdate {
 
 // ── Разметка кнопок ──────────────────────────────────────────────────────────
 
+/**
+ * Кнопка под сообщением: callback боту или web_app — открывает приложение
+ * клуба внутри Telegram (только в личке с ботом).
+ */
 export interface InlineKeyboardButton {
 	text: string;
-	callback_data: string;
+	callback_data?: string;
+	web_app?: { url: string };
 }
 
 export interface InlineKeyboardMarkup {

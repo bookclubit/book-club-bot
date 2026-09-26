@@ -169,18 +169,37 @@ const SCHEMA = [
 		last_reviewed INTEGER NOT NULL,
 		PRIMARY KEY (user_id, card_id)
 	)`,
-	// Настройки пользователя (сколько карточек в день и т.п.).
-	`CREATE TABLE IF NOT EXISTS user_settings (
-		user_id INTEGER PRIMARY KEY,
-		daily_cards INTEGER NOT NULL DEFAULT 5,
-		updated_at INTEGER NOT NULL
+	// Колода — общая для сайта и бота: по ней сайт собирает повторение, а бот
+	// решает, о чём напоминать. Книга целиком — chapter = ''; отдельная глава
+	// (старые подписки сайта) — номер главы строкой, как поле chapter карточки.
+	`CREATE TABLE IF NOT EXISTS user_deck (
+		user_id INTEGER NOT NULL,
+		book TEXT NOT NULL,
+		chapter TEXT NOT NULL DEFAULT '',
+		added_at INTEGER NOT NULL,
+		PRIMARY KEY (user_id, book, chapter)
 	)`,
-	// Активная сессия повторения в боте (карточки по одной): очередь оставшихся.
-	`CREATE TABLE IF NOT EXISTS study_session (
-		user_id INTEGER PRIMARY KEY,
-		queue TEXT NOT NULL,
-		reviewed INTEGER NOT NULL DEFAULT 0,
-		updated_at INTEGER NOT NULL
+	// Журнал повторений: каждая оценка карточки. card_progress хранит только
+	// последнее состояние, а активность по дням, серия и точность — из журнала.
+	`CREATE TABLE IF NOT EXISTS review_log (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER NOT NULL,
+		card_id TEXT NOT NULL,
+		book_id TEXT,
+		quality INTEGER NOT NULL,
+		reviewed_at INTEGER NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS review_log_user ON review_log(user_id, reviewed_at)`,
+	// Вход на сайт через бота. code уходит в диплинк t.me/<бот>?start=login_<code>,
+	// secret остаётся в браузере (здесь только его хэш): человек подтверждает
+	// вход кнопкой в боте, а сессию забирает только тот браузер, что начал вход.
+	`CREATE TABLE IF NOT EXISTS login_requests (
+		code TEXT PRIMARY KEY,
+		secret_hash TEXT NOT NULL,
+		user_id INTEGER,
+		created_at INTEGER NOT NULL,
+		confirmed_at INTEGER,
+		used_at INTEGER
 	)`,
 	// Группы и каналы клуба, куда бот может постить: добавляются командой
 	// /anons_here в самой группе (от админа), убираются /anons_stop.
@@ -759,7 +778,11 @@ export async function markReminderSent(
 
 // ── Аккаунты платформы ───────────────────────────────────────────────────────
 
-/** Создаёт/обновляет пользователя (профиль из Telegram). */
+/**
+ * Создаёт/обновляет пользователя (профиль из Telegram). Фото знают только
+ * Mini App и сайт: апдейты бота его не несут, поэтому пустое фото не стирает
+ * сохранённое.
+ */
 export async function upsertUser(
 	db: D1Database,
 	user: {
@@ -780,7 +803,7 @@ export async function upsertUser(
 				username = excluded.username,
 				first_name = excluded.first_name,
 				last_name = excluded.last_name,
-				photo_url = excluded.photo_url,
+				photo_url = COALESCE(excluded.photo_url, users.photo_url),
 				updated_at = excluded.updated_at`,
 		)
 		.bind(
@@ -881,83 +904,234 @@ export async function saveCardProgress(
 		.run();
 }
 
-// ── Настройки пользователя ───────────────────────────────────────────────────
+// ── Колода (общая для сайта и бота) ──────────────────────────────────────────
 
-export const DEFAULT_DAILY_CARDS = 5;
-/** Допустимые значения «карточек в день» (кнопки настроек в боте и miniapp). */
-export const DAILY_CARD_OPTIONS = [3, 5, 10, 15, 20];
+/**
+ * Колода в формате сайта: книги целиком и отдельные главы
+ * (`<папка>::<номер главы>`). Это подписки, а не список карточек: новые
+ * карточки подписанной книги попадают в колоду сами.
+ */
+export interface Deck {
+	books: string[];
+	chapters: string[];
+}
 
-/** Сколько карточек в день выдавать пользователю (по умолчанию 5). */
-export async function getDailyCards(db: D1Database, userId: number): Promise<number> {
+export async function getDeck(db: D1Database, userId: number): Promise<Deck> {
 	await ensureSchema(db);
-	const row = await db
-		.prepare("SELECT daily_cards FROM user_settings WHERE user_id = ?")
+	const { results } = await db
+		.prepare("SELECT book, chapter FROM user_deck WHERE user_id = ? ORDER BY added_at, book, chapter")
 		.bind(userId)
-		.first<{ daily_cards: number }>();
-	return row?.daily_cards ?? DEFAULT_DAILY_CARDS;
+		.all<{ book: string; chapter: string }>();
+	const books = results.filter((r) => r.chapter === "").map((r) => r.book);
+	const whole = new Set(books);
+	const chapters = results
+		.filter((r) => r.chapter !== "" && !whole.has(r.book))
+		.map((r) => `${r.book}::${r.chapter}`);
+	return { books, chapters };
 }
 
-export async function setDailyCards(db: D1Database, userId: number, n: number): Promise<void> {
-	await ensureSchema(db);
-	await db
-		.prepare(
-			`INSERT INTO user_settings (user_id, daily_cards, updated_at) VALUES (?, ?, ?)
-			 ON CONFLICT(user_id) DO UPDATE SET daily_cards = excluded.daily_cards,
-				updated_at = excluded.updated_at`,
-		)
-		.bind(userId, n, Date.now())
-		.run();
-}
-
-// ── Сессия повторения (карточки по одной, диалог) ────────────────────────────
-
-/** Элемент очереди повторения: книга + id карточки. */
-export interface SessionCard {
-	b: string;
-	c: string;
-}
-
-export interface StudySession {
-	queue: SessionCard[];
-	reviewed: number;
-}
-
-export async function saveSession(
+/** Строки «книга целиком»: подписки на её главы становятся лишними. */
+function wholeBookStatements(
 	db: D1Database,
 	userId: number,
-	queue: SessionCard[],
-	reviewed: number,
+	book: string,
+	now: number,
+): D1PreparedStatement[] {
+	return [
+		db
+			.prepare("DELETE FROM user_deck WHERE user_id = ? AND book = ? AND chapter <> ''")
+			.bind(userId, book),
+		db
+			.prepare(
+				"INSERT OR IGNORE INTO user_deck (user_id, book, chapter, added_at) VALUES (?, ?, '', ?)",
+			)
+			.bind(userId, book, now),
+	];
+}
+
+export async function addDeckBook(db: D1Database, userId: number, book: string): Promise<void> {
+	await ensureSchema(db);
+	await db.batch(wholeBookStatements(db, userId, book, Date.now()));
+}
+
+/** Убирает книгу из колоды вместе с подписками на её главы. */
+export async function removeDeckBook(db: D1Database, userId: number, book: string): Promise<void> {
+	await ensureSchema(db);
+	await db.prepare("DELETE FROM user_deck WHERE user_id = ? AND book = ?").bind(userId, book).run();
+}
+
+/**
+ * Вливает колоду с устройства (гостевой режим сайта) в серверную. Только
+ * добавляет: сайт вливает колоду один раз, при первом входе, поэтому убранное
+ * на другом устройстве сюда не вернётся.
+ */
+export async function mergeDeck(db: D1Database, userId: number, deck: Deck): Promise<void> {
+	const current = await getDeck(db, userId);
+	const whole = new Set([...current.books, ...deck.books]);
+	const now = Date.now();
+	const statements: D1PreparedStatement[] = [];
+	for (const book of deck.books) {
+		if (!current.books.includes(book)) statements.push(...wholeBookStatements(db, userId, book, now));
+	}
+	for (const key of deck.chapters) {
+		const [book, chapter] = key.split("::");
+		if (!book || !chapter || whole.has(book)) continue;
+		statements.push(
+			db
+				.prepare(
+					"INSERT OR IGNORE INTO user_deck (user_id, book, chapter, added_at) VALUES (?, ?, ?, ?)",
+				)
+				.bind(userId, book, chapter, now),
+		);
+	}
+	if (statements.length > 0) await db.batch(statements);
+}
+
+// ── Журнал повторений ────────────────────────────────────────────────────────
+
+/** Оценка карточки в журнале: когда и с каким качеством ответа (0–5). */
+export interface ReviewEntry {
+	at: number;
+	quality: number;
+}
+
+export async function logReview(
+	db: D1Database,
+	userId: number,
+	cardId: string,
+	bookId: string,
+	quality: number,
+	at: number,
 ): Promise<void> {
 	await ensureSchema(db);
 	await db
 		.prepare(
-			`INSERT INTO study_session (user_id, queue, reviewed, updated_at) VALUES (?, ?, ?, ?)
-			 ON CONFLICT(user_id) DO UPDATE SET queue = excluded.queue,
-				reviewed = excluded.reviewed, updated_at = excluded.updated_at`,
+			"INSERT INTO review_log (user_id, card_id, book_id, quality, reviewed_at) VALUES (?, ?, ?, ?, ?)",
 		)
-		.bind(userId, JSON.stringify(queue), reviewed, Date.now())
+		.bind(userId, cardId, bookId, quality, at)
 		.run();
 }
 
-export async function getSession(db: D1Database, userId: number): Promise<StudySession | null> {
+/** Все оценки пользователя по времени — из них считается статистика. */
+export async function listReviews(db: D1Database, userId: number): Promise<ReviewEntry[]> {
 	await ensureSchema(db);
-	const row = await db
-		.prepare("SELECT queue, reviewed FROM study_session WHERE user_id = ?")
+	const { results } = await db
+		.prepare("SELECT reviewed_at AS at, quality FROM review_log WHERE user_id = ? ORDER BY reviewed_at")
 		.bind(userId)
-		.first<{ queue: string; reviewed: number }>();
-	if (!row) return null;
-	try {
-		return { queue: JSON.parse(row.queue) as SessionCard[], reviewed: row.reviewed };
-	} catch {
-		return null;
-	}
+		.all<ReviewEntry>();
+	return results;
 }
 
-export async function clearSession(db: D1Database, userId: number): Promise<void> {
+/**
+ * Прогресс с устройства (гостевой режим сайта) пишется только для карточек,
+ * которых на сервере ещё нет: серверная история важнее. Возвращает, сколько
+ * карточек добавилось.
+ */
+export async function importCardProgress(
+	db: D1Database,
+	userId: number,
+	items: { bookId: string; progress: CardProgress }[],
+): Promise<number> {
 	await ensureSchema(db);
-	await db.prepare("DELETE FROM study_session WHERE user_id = ?").bind(userId).run();
+	if (items.length === 0) return 0;
+	const results = await db.batch(
+		items.map(({ bookId, progress: p }) =>
+			db
+				.prepare(
+					`INSERT INTO card_progress
+						(user_id, card_id, book_id, repetition, interval, easiness, due_date, last_reviewed)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+					 ON CONFLICT(user_id, card_id) DO NOTHING`,
+				)
+				.bind(
+					userId,
+					p.cardId,
+					bookId,
+					p.repetition,
+					p.interval,
+					p.easiness,
+					p.dueDate,
+					p.lastReviewed,
+				),
+		),
+	);
+	return results.reduce((n, r) => n + (r.meta.changes ?? 0), 0);
 }
 
+// ── Вход на сайт через бота ──────────────────────────────────────────────────
+
+export interface LoginRequest {
+	code: string;
+	secret_hash: string;
+	user_id: number | null;
+	created_at: number;
+	confirmed_at: number | null;
+	used_at: number | null;
+}
+
+/** Сколько хранить заявки на вход: дольше любой из них не нужна. */
+const LOGIN_REQUEST_KEEP_MS = 60 * 60 * 1000;
+
+/** Новая заявка на вход; заодно подчищает старые. */
+export async function createLoginRequest(
+	db: D1Database,
+	code: string,
+	secretHash: string,
+	now: number,
+): Promise<void> {
+	await ensureSchema(db);
+	await db.batch([
+		db.prepare("DELETE FROM login_requests WHERE created_at < ?").bind(now - LOGIN_REQUEST_KEEP_MS),
+		db
+			.prepare("INSERT INTO login_requests (code, secret_hash, created_at) VALUES (?, ?, ?)")
+			.bind(code, secretHash, now),
+	]);
+}
+
+export async function getLoginRequest(db: D1Database, code: string): Promise<LoginRequest | null> {
+	await ensureSchema(db);
+	return db.prepare("SELECT * FROM login_requests WHERE code = ?").bind(code).first<LoginRequest>();
+}
+
+/**
+ * Подтверждение входа из бота: заявка привязывается к человеку. Только свежая
+ * (создана не раньше `notBefore`) и ещё никем не подтверждённая.
+ */
+export async function confirmLoginRequest(
+	db: D1Database,
+	code: string,
+	userId: number,
+	now: number,
+	notBefore: number,
+): Promise<boolean> {
+	await ensureSchema(db);
+	const result = await db
+		.prepare(
+			`UPDATE login_requests SET user_id = ?, confirmed_at = ?
+			 WHERE code = ? AND confirmed_at IS NULL AND used_at IS NULL AND created_at >= ?`,
+		)
+		.bind(userId, now, code, notBefore)
+		.run();
+	return (result.meta.changes ?? 0) > 0;
+}
+
+/** Сессия по заявке выдаётся один раз: повторный вызов вернёт false. */
+export async function consumeLoginRequest(db: D1Database, code: string, now: number): Promise<boolean> {
+	await ensureSchema(db);
+	const result = await db
+		.prepare(
+			"UPDATE login_requests SET used_at = ? WHERE code = ? AND confirmed_at IS NOT NULL AND used_at IS NULL",
+		)
+		.bind(now, code)
+		.run();
+	return (result.meta.changes ?? 0) > 0;
+}
+
+/** Отказ от входа в боте: неподтверждённая заявка удаляется. */
+export async function cancelLoginRequest(db: D1Database, code: string): Promise<void> {
+	await ensureSchema(db);
+	await db.prepare("DELETE FROM login_requests WHERE code = ? AND confirmed_at IS NULL").bind(code).run();
+}
 
 // ── Группы клуба для постов ──────────────────────────────────────────────────
 

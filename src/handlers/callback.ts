@@ -1,12 +1,18 @@
-// Обработка нажатий inline-кнопок: повторение карточек (по одной) и настройки.
+// Обработка нажатий inline-кнопок: вход на сайт и заявки на доклады.
 
-import type { Grade, TelegramCallbackQuery } from "../types";
-import { DAILY_CARD_OPTIONS, setDailyCards } from "../lib/db";
-import { handleStudyFlip, handleStudyGrade } from "../lib/study";
-import { answerCallback, editMessageText } from "../lib/telegram";
+import type { TelegramCallbackQuery } from "../types";
+import { answerCallback, sendMessage } from "../lib/telegram";
+import { appKeyboard } from "../lib/urls";
+import { handleLoginCallback } from "./login";
 import { handleApplyCallback, handleClaimCallback, handleTakenCallback } from "./registration";
 
-const VALID_GRADES: readonly Grade[] = ["again", "hard", "easy"];
+/**
+ * Кнопки старых карточек в чате («Показать ответ», оценки, настройка
+ * карт/день): повторение переехало в приложение, кнопки в истории остались.
+ */
+function isLegacyStudyButton(data: string): boolean {
+	return data === "sf" || data.startsWith("sg:") || data.startsWith("set:");
+}
 
 export async function handleCallback(env: Env, cb: TelegramCallbackQuery): Promise<void> {
 	const data = cb.data ?? "";
@@ -18,37 +24,25 @@ export async function handleCallback(env: Env, cb: TelegramCallbackQuery): Promi
 		return;
 	}
 
+	// Вход на сайт через бота (см. handlers/login.ts).
+	if (data.startsWith("login:") || data.startsWith("login_no:")) {
+		return handleLoginCallback(env, cb, data);
+	}
+
 	// Заявки на доклады и на участие в клубе (см. handlers/registration.ts).
 	if (data.startsWith("sclaim:")) return handleClaimCallback(env, cb, data);
 	if (data.startsWith("staken:")) return handleTakenCallback(env, cb, data);
 	if (data === "mapply") return handleApplyCallback(env, cb);
 
-	// Повторение карточек (текущая карточка — из сессии в D1).
-	if (data === "sf") return handleStudyFlip(env, cb);
-	if (data.startsWith("sg:")) {
-		const grade = data.slice("sg:".length) as Grade;
-		if (!VALID_GRADES.includes(grade)) {
-			await answerCallback(env.BOT_TOKEN, cb.id, "Неизвестная оценка");
-			return;
-		}
-		return handleStudyGrade(env, cb, grade);
-	}
-
-	// Настройки: set:<n> — сколько карточек в день.
-	if (data.startsWith("set:")) {
-		const n = Number(data.slice("set:".length));
-		if (!DAILY_CARD_OPTIONS.includes(n)) {
-			await answerCallback(env.BOT_TOKEN, cb.id, "Недопустимое значение");
-			return;
-		}
-		await setDailyCards(env.BOOK_CLUB_DB, message.chat.id, n);
-		await editMessageText(
+	if (isLegacyStudyButton(data)) {
+		await answerCallback(env.BOT_TOKEN, cb.id, "Карточки теперь в приложении клуба");
+		await sendMessage(
 			env.BOT_TOKEN,
 			message.chat.id,
-			message.message_id,
-			`⚙️ <b>Настройки</b>\n\nКарточек в день: <b>${n}</b>\n\nИзменить: /settings`,
+			"Карточки теперь проходят в приложении клуба — там колода, прогресс и статистика. " +
+				"Я напоминаю, когда их пора повторить.",
+			appKeyboard(env, "🗂 Открыть карточки", "/study"),
 		);
-		await answerCallback(env.BOT_TOKEN, cb.id, "Сохранено 👍");
 		return;
 	}
 

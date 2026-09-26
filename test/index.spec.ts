@@ -4,15 +4,28 @@ declare module "cloudflare:test" {
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 import worker, { groupCommand } from "../src/index";
-import type { CardProgress, ClubEvent, DeckCard, Flashcard } from "../src/types";
-import {
-	calculateNextReview,
-	initialProgress,
-	reviewFromQuality,
-	selectDue,
-} from "../src/lib/spaced-repetition";
+import type { CardProgress, ClubEvent, Flashcard } from "../src/types";
+import { initialProgress, reviewFromQuality } from "../src/lib/spaced-repetition";
 import { eventArchived, eventDateFromPath, eventPathById, eventProgram } from "../src/lib/events";
-import { renderBack } from "../src/lib/cards";
+import { bookScope, cardsInScope, deckFolders, parseDeck } from "../src/lib/deck";
+import {
+	checkLogin,
+	confirmLogin,
+	isLoginCode,
+	isLoginSecret,
+	LOGIN_TTL_MS,
+	loginPending,
+	startLogin,
+} from "../src/lib/login";
+import {
+	ACTIVITY_DAYS,
+	computeStats,
+	MATURE_DAYS,
+	streaks,
+	type BookStats,
+} from "../src/lib/stats";
+import { renderDueCards, renderStatus } from "../src/lib/reminders";
+import { appKeyboard } from "../src/lib/urls";
 import { mergeTalkTopics } from "../src/lib/topics";
 import { buildTopics, renderAnnounce, renderDay, renderSoon } from "../src/lib/announce";
 import {
@@ -27,15 +40,23 @@ import {
 import { findSpeakerByUsername, telegramHandle } from "../src/lib/speakers";
 import {
 	addAnnounceChat,
+	addDeckBook,
 	ANNOUNCE_CHAT_KEY,
 	assignClaim,
-	cardKey,
+	cancelLoginRequest,
 	createSpeakerClaim,
 	deleteSpeakerClaim,
 	findSpeakerChat,
+	getCardProgressMap,
 	getClaimByTopic,
+	getDeck,
 	getPostDraft,
 	getSpeakerProfile,
+	getUser,
+	listReviews,
+	mergeDeck,
+	removeDeckBook,
+	saveCardProgress,
 	listAnnounceChats,
 	listMembershipRequests,
 	listDuePostDrafts,
@@ -346,33 +367,6 @@ describe("Объединённые темы: несколько тем — од�
 	});
 });
 
-describe("SM-2 calculateNextReview", () => {
-	const now = 1_700_000_000_000;
-	const DAY = 24 * 60 * 60 * 1000;
-
-	it("первое успешное повторение → интервал 1 день", () => {
-		const p = calculateNextReview(undefined, "easy", now);
-		expect(p.repetition).toBe(1);
-		expect(p.interval).toBe(1);
-		expect(p.dueDate).toBe(now + DAY);
-	});
-
-	it("«Забыл» сбрасывает repetition и ставит интервал 1", () => {
-		const seed = calculateNextReview(undefined, "easy", now); // rep=1
-		const second = calculateNextReview(seed, "easy", now); // rep=2, interval=6
-		expect(second.interval).toBe(6);
-		const forgot = calculateNextReview(second, "again", now);
-		expect(forgot.repetition).toBe(0);
-		expect(forgot.interval).toBe(1);
-	});
-
-	it("коэффициент лёгкости не опускается ниже 1.3", () => {
-		let p = calculateNextReview(undefined, "again", now);
-		for (let i = 0; i < 10; i++) p = calculateNextReview(p, "again", now);
-		expect(p.easiness).toBeGreaterThanOrEqual(1.3);
-	});
-});
-
 describe("Telegram-аутентификация", () => {
 	const TOKEN = "123456:test-bot-token";
 	const enc = new TextEncoder();
@@ -473,76 +467,370 @@ describe("SM-2 reviewFromQuality (оценки сайта, 0–5)", () => {
 		expect(failed.repetition).toBe(0);
 		expect(failed.interval).toBe(1);
 	});
+
+	it("коэффициент лёгкости не опускается ниже 1.3", () => {
+		let p = reviewFromQuality(undefined, 1, now);
+		for (let i = 0; i < 10; i++) p = reviewFromQuality(p, 1, now);
+		expect(p.easiness).toBeGreaterThanOrEqual(1.3);
+	});
 });
 
-describe("selectDue (общая для бота и рассылки выборка карточек)", () => {
-	const now = 1_700_000_000_000;
-	const card = (id: string): Flashcard => ({
+describe("Колода: общая для сайта и бота", () => {
+	const card = (id: string, chapter: string): Flashcard => ({
 		id,
 		type: "qa",
 		question: "q",
 		answer: "a",
-		chapter: "1",
+		chapter,
 		difficulty: "easy",
 	});
-	const deck: DeckCard[] = [
-		{ book: "book-1", card: card("a") },
-		{ book: "book-2", card: card("b") },
-		{ book: "book-2", card: card("c") },
-	];
-	const keyOf = (d: DeckCard) => cardKey(d.book, d.card.id);
+	const sorted = (list: string[]) => [...list].sort();
 
-	it("новые карточки (без прогресса) подлежат повторению", () => {
-		const due = selectDue(deck, keyOf, new Map(), now, 5);
-		expect(due).toHaveLength(3);
+	it("книга целиком, отдельные главы или ничего — как на сайте", () => {
+		const deck = { books: ["docker"], chapters: ["react::2", "react::3"] };
+		expect(bookScope(deck, "docker")).toBe("all");
+		expect(bookScope(deck, "ai")).toBeNull();
+		const cards = [card("r1", "1"), card("r2", "2"), card("r3", "3")];
+		expect(cardsInScope(cards, bookScope(deck, "react")).map((c) => c.id)).toEqual(["r2", "r3"]);
+		expect(deckFolders(deck)).toEqual(["docker", "react"]);
 	});
 
-	it("соблюдает лимит", () => {
-		const due = selectDue(deck, keyOf, new Map(), now, 1);
-		expect(due).toHaveLength(1);
+	it("колода из запроса: мусор и дубли отбрасываются", () => {
+		expect(
+			parseDeck({ books: ["docker", "../etc", 5, "docker"], chapters: ["react::2", "react::x", "evil"] }),
+		).toEqual({ books: ["docker"], chapters: ["react::2"] });
+		expect(parseDeck(null)).toEqual({ books: [], chapters: [] });
 	});
 
-	it("карточки с dueDate в будущем исключаются, просроченные — первыми", () => {
-		const progress = new Map<string, CardProgress>([
-			// «a» — повторять только завтра, не должна попасть в выборку.
-			["book-1:a", { ...initialProgress("book-1:a", now), dueDate: now + 1 }],
-			// «c» — просрочена сильнее, чем новая «b» (dueDate=0 у новых при сортировке).
-			["book-2:c", { ...initialProgress("book-2:c", now), dueDate: now - 1000 }],
-		]);
-		const due = selectDue(deck, keyOf, progress, now, 5);
-		expect(due.map((d) => d.card.id)).toEqual(["b", "c"]);
+	it("добавление, удаление и слияние с устройства (D1)", async () => {
+		resetSchemaCacheForTests();
+		const db = env.BOOK_CLUB_DB;
+		const user = 7001;
+		await addDeckBook(db, user, "docker");
+		await mergeDeck(db, user, { books: ["fluent-react"], chapters: ["docker::2", "ai-engineering::1"] });
+		let deck = await getDeck(db, user);
+		// Глава книги, которая уже в колоде целиком, лишняя.
+		expect(sorted(deck.books)).toEqual(["docker", "fluent-react"]);
+		expect(deck.chapters).toEqual(["ai-engineering::1"]);
+
+		// Книга целиком вытесняет подписки на её главы.
+		await addDeckBook(db, user, "ai-engineering");
+		deck = await getDeck(db, user);
+		expect(deck.chapters).toEqual([]);
+		expect(sorted(deck.books)).toEqual(["ai-engineering", "docker", "fluent-react"]);
+
+		await removeDeckBook(db, user, "docker");
+		expect(sorted((await getDeck(db, user)).books)).toEqual(["ai-engineering", "fluent-react"]);
+		// Колода у каждого своя.
+		expect(await getDeck(db, 7002)).toEqual({ books: [], chapters: [] });
 	});
 });
 
-describe("Рендер карточки", () => {
-	const base = { id: "docker-007", chapter: "2", difficulty: "easy" } as const;
+describe("Вход на сайт через бота", () => {
+	it("заявка → кнопка в боте → сессия один раз и только своему браузеру", async () => {
+		resetSchemaCacheForTests();
+		const db = env.BOOK_CLUB_DB;
+		const now = Date.now();
+		const { code, secret } = await startLogin(db, now);
+		expect(isLoginCode(code)).toBe(true);
+		expect(isLoginSecret(secret)).toBe(true);
+		expect(await loginPending(db, code, now)).toBe(true);
+		expect(await checkLogin(db, code, secret, now)).toEqual({ status: "pending" });
 
-	it("пример показывается под ответом, если он задан", () => {
-		const text = renderBack({
-			...base,
-			type: "command",
-			command: "docker ps",
-			result: "список запущенных контейнеров",
-			example: "docker ps -a  # включая остановленные",
-		});
-		expect(text).toContain("Что делает:");
-		expect(text).toContain("<b>Пример:</b>\n<pre>docker ps -a  # включая остановленные</pre>");
+		expect(await confirmLogin(db, code, 555, now + 1000)).toBe(true);
+		// Подтверждённую заявку второй раз (или другим человеком) не перехватить.
+		expect(await confirmLogin(db, code, 666, now + 2000)).toBe(false);
+		expect(await loginPending(db, code, now + 2000)).toBe(false);
+
+		// code виден в чате с ботом, но без secret сессию не получить.
+		expect(await checkLogin(db, code, "0".repeat(64), now + 3000)).toEqual({ status: "denied" });
+
+		expect(await checkLogin(db, code, secret, now + 3000)).toEqual({ status: "ok", userId: 555 });
+		expect(await checkLogin(db, code, secret, now + 4000)).toEqual({ status: "expired" });
 	});
 
-	it("без примера лишнего блока нет", () => {
-		const text = renderBack({ ...base, type: "qa", question: "q", answer: "a" });
-		expect(text).not.toContain("Пример");
+	it("неподтверждённая заявка устаревает, «Отмена» её удаляет", async () => {
+		resetSchemaCacheForTests();
+		const db = env.BOOK_CLUB_DB;
+		const now = Date.now();
+		const late = now + LOGIN_TTL_MS + 1;
+		const old = await startLogin(db, now);
+		expect(await confirmLogin(db, old.code, 555, late)).toBe(false);
+		expect(await checkLogin(db, old.code, old.secret, late)).toEqual({ status: "expired" });
+
+		const fresh = await startLogin(db, now);
+		await cancelLoginRequest(db, fresh.code);
+		expect(await checkLogin(db, fresh.code, fresh.secret, now)).toEqual({ status: "expired" });
 	});
 
-	it("пример экранируется — в нём бывают угловые скобки", () => {
-		const text = renderBack({
-			...base,
-			type: "qa",
-			question: "q",
-			answer: "a",
-			example: "<div>hi</div>",
+	it("HTTP: /api/auth/bot выдаёт code и secret, check — сессию после подтверждения", async () => {
+		resetSchemaCacheForTests();
+		const testEnv = { ...env, BOT_TOKEN: "123456:test-bot-token" };
+		const call = async (path: string, body: unknown = {}) => {
+			const ctx = createExecutionContext();
+			const res = await worker.fetch(
+				new IncomingRequest(`http://example.com${path}`, {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify(body),
+				}),
+				testEnv,
+				ctx,
+			);
+			await waitOnExecutionContext(ctx);
+			return res;
+		};
+
+		const started = (await (await call("/api/auth/bot")).json()) as { code: string; secret: string };
+		expect(await (await call("/api/auth/bot/check", started)).json()).toEqual({ status: "pending" });
+
+		await upsertUser(env.BOOK_CLUB_DB, { id: 4242, username: "reader", firstName: "Читатель" });
+		expect(await confirmLogin(env.BOOK_CLUB_DB, started.code, 4242)).toBe(true);
+		const data = (await (await call("/api/auth/bot/check", started)).json()) as {
+			status: string;
+			token: string;
+			user: { id: number; username: string };
+		};
+		expect(data.status).toBe("ok");
+		expect(data.user).toMatchObject({ id: 4242, username: "reader" });
+		expect(await verifySession(testEnv.BOT_TOKEN, data.token)).toBe(4242);
+
+		expect((await call("/api/auth/bot/check", started)).status).toBe(410);
+		expect((await call("/api/auth/bot/check", { code: "x", secret: "y" })).status).toBe(400);
+	});
+
+	it("вход через бота не стирает фото, пришедшее из Mini App", async () => {
+		resetSchemaCacheForTests();
+		const db = env.BOOK_CLUB_DB;
+		await upsertUser(db, { id: 4343, firstName: "Аня", photoUrl: "https://t.me/i/userpic/anya.jpg" });
+		await upsertUser(db, { id: 4343, firstName: "Аня", username: "anya" });
+		const user = await getUser(db, 4343);
+		expect(user?.photo_url).toBe("https://t.me/i/userpic/anya.jpg");
+		expect(user?.username).toBe("anya");
+	});
+});
+
+describe("Статистика изучения", () => {
+	const DAY = 24 * 60 * 60 * 1000;
+	const now = Date.parse("2026-09-26T12:00:00+03:00");
+	const card = (id: string, chapter = "1"): Flashcard => ({
+		id,
+		type: "qa",
+		question: "q",
+		answer: "a",
+		chapter,
+		difficulty: "easy",
+	});
+	const learned = (key: string, interval: number, dueDate: number): [string, CardProgress] => [
+		key,
+		{ cardId: key, repetition: 2, interval, easiness: 2.5, dueDate, lastReviewed: now - DAY },
+	];
+	const books = [
+		{ folder: "docker", title: "Docker", cards: [card("d1"), card("d2"), card("d3")] },
+		{ folder: "react", title: "React", cards: [card("r1"), card("r2", "2")] },
+		{ folder: "ai", title: "AI", cards: [card("a1")] },
+	];
+	const noDeck = { books: [], chapters: [] };
+
+	it("выучено, изучаю, новые; к повторению — только по колоде", () => {
+		const stats = computeStats({
+			books,
+			deck: { books: ["docker"], chapters: [] },
+			progress: new Map([
+				learned("docker:d1", MATURE_DAYS, now + 5 * DAY), // выучена и не к повторению
+				learned("docker:d2", 3, now - DAY), // изучается, срок подошёл
+				learned("react:r1", 6, now - DAY), // книги нет в колоде: прогресс виден, напоминать не о чем
+			]),
+			reviews: [],
+			now,
 		});
-		expect(text).toContain("&lt;div&gt;hi&lt;/div&gt;");
+		// ai — ни в колоде, ни в прогрессе: в статистику не попадает.
+		expect(stats.books.map((b) => b.folder)).toEqual(["docker", "react"]);
+		const [docker, react] = stats.books;
+		expect(docker).toMatchObject({ in_deck: true, total: 3, mature: 1, learning: 1, fresh: 1, due: 2 });
+		expect(react).toMatchObject({ in_deck: false, total: 2, learning: 1, fresh: 1, due: 0 });
+		expect(stats.totals).toEqual({ cards: 5, fresh: 2, learning: 2, mature: 1, due: 2 });
+	});
+
+	it("подписка на главу: к повторению только её карточки", () => {
+		const stats = computeStats({
+			books,
+			deck: { books: [], chapters: ["react::2"] },
+			progress: new Map(),
+			reviews: [],
+			now,
+		});
+		expect(stats.books).toHaveLength(1);
+		expect(stats.books[0]).toMatchObject({ folder: "react", in_deck: true, total: 2, fresh: 2, due: 1 });
+	});
+
+	it("активность по дням МСК, серия и доля вспомненного", () => {
+		const reviews = [
+			{ at: Date.parse("2026-09-26T09:00:00+03:00"), quality: 4 },
+			{ at: Date.parse("2026-09-25T20:00:00+03:00"), quality: 1 },
+			{ at: Date.parse("2026-09-25T21:00:00+03:00"), quality: 5 },
+			// 00:30 по Москве — уже 24-е, хотя по UTC ещё 23-е.
+			{ at: Date.parse("2026-09-24T00:30:00+03:00"), quality: 3 },
+			{ at: Date.parse("2026-09-21T12:00:00+03:00"), quality: 4 },
+		];
+		const stats = computeStats({ books, deck: noDeck, progress: new Map(), reviews, now });
+		expect(stats.activity).toHaveLength(ACTIVITY_DAYS);
+		expect(stats.activity.at(-1)).toEqual({ date: "2026-09-26", count: 1 });
+		expect(stats.activity.at(-2)).toEqual({ date: "2026-09-25", count: 2 });
+		expect(stats.activity.at(-3)).toEqual({ date: "2026-09-24", count: 1 });
+		expect(stats.activity.at(-4)).toEqual({ date: "2026-09-23", count: 0 });
+		expect(stats.streak).toEqual({ current: 3, best: 3 });
+		expect(stats.reviews).toEqual({ total: 5, today: 1, week: 5, accuracy: 4 / 5 });
+	});
+
+	it("серия не рвётся, пока сегодня ещё не занимался", () => {
+		expect(streaks(["2026-09-24", "2026-09-25"], "2026-09-26")).toEqual({ current: 2, best: 2 });
+		expect(streaks(["2026-09-22", "2026-09-23", "2026-09-24"], "2026-09-26")).toEqual({
+			current: 0,
+			best: 3,
+		});
+		expect(streaks([], "2026-09-26")).toEqual({ current: 0, best: 0 });
+	});
+});
+
+describe("Напоминания о карточках", () => {
+	const book = (title: string, due: number): BookStats => ({
+		folder: title.toLowerCase(),
+		title,
+		in_deck: true,
+		total: 10,
+		fresh: 0,
+		learning: 0,
+		mature: 0,
+		due,
+		last_reviewed: null,
+	});
+
+	it("утреннее: сколько и по каким книгам, со склонением и экранированием", () => {
+		const text = renderDueCards([book("Docker", 1), book("React <19>", 3)], { morning: true });
+		expect(text).toContain("Пора повторить 4 карточки");
+		expect(text).toContain("• Docker — 1");
+		expect(text).toContain("• React &lt;19&gt; — 3");
+		expect(renderDueCards([book("Docker", 5)])).toContain("К повторению 5 карточек");
+		expect(renderDueCards([book("Docker", 21)])).toContain("21 карточка");
+	});
+
+	it("кнопка открывает приложение внутри Telegram (web_app)", () => {
+		const kb = appKeyboard({ MINIAPP_URL: "https://app.example/" }, "Повторить", "/study");
+		expect(kb.inline_keyboard[0][0]).toEqual({
+			text: "Повторить",
+			web_app: { url: "https://app.example/study" },
+		});
+	});
+
+	it("сводка /status считается той же статистикой, что на сайте", () => {
+		const stats = computeStats({
+			books: [{ folder: "docker", title: "Docker", cards: [] }],
+			deck: { books: ["docker"], chapters: [] },
+			progress: new Map(),
+			reviews: [{ at: Date.now(), quality: 4 }],
+			now: Date.now(),
+		});
+		const text = renderStatus(stats);
+		expect(text).toContain("Серия: <b>1 день</b>");
+		expect(text).toContain("Вспоминаешь: <b>100%</b>");
+		expect(text).toContain("• Docker — выучено 0 из 0");
+
+		const empty = computeStats({ books: [], deck: { books: [], chapters: [] }, progress: new Map(), reviews: [], now: Date.now() });
+		expect(renderStatus(empty)).toContain("Пока пусто");
+	});
+});
+
+describe("API карточек: колода, импорт, журнал", () => {
+	const TOKEN = "123456:test-bot-token";
+	const testEnv = { ...env, BOT_TOKEN: TOKEN };
+
+	async function api(
+		path: string,
+		userId: number | null,
+		init: { method?: string; body?: unknown } = {},
+	): Promise<Response> {
+		const headers: Record<string, string> = { "content-type": "application/json" };
+		if (userId !== null) headers.authorization = `Bearer ${await mintSession(TOKEN, userId)}`;
+		const ctx = createExecutionContext();
+		const res = await worker.fetch(
+			new IncomingRequest(`http://example.com${path}`, {
+				method: init.method ?? "GET",
+				headers,
+				body: init.body === undefined ? undefined : JSON.stringify(init.body),
+			}),
+			testEnv,
+			ctx,
+		);
+		await waitOnExecutionContext(ctx);
+		return res;
+	}
+	const post = (path: string, userId: number | null, body: unknown) =>
+		api(path, userId, { method: "POST", body });
+
+	it("без входа — 401", async () => {
+		expect((await api("/api/deck", null)).status).toBe(401);
+		expect((await api("/api/stats", null)).status).toBe(401);
+		expect((await post("/api/deck", null, { action: "add", book: "docker" })).status).toBe(401);
+		expect((await post("/api/progress/import", null, { items: [] })).status).toBe(401);
+	});
+
+	it("колода: add, merge, remove; чужие папки не принимаются", async () => {
+		resetSchemaCacheForTests();
+		let res = await post("/api/deck", 9001, { action: "add", book: "docker-up-and-running" });
+		expect(await res.json()).toEqual({ deck: { books: ["docker-up-and-running"], chapters: [] } });
+
+		expect((await post("/api/deck", 9001, { action: "add", book: "../../etc" })).status).toBe(400);
+		expect((await post("/api/deck", 9001, { action: "wipe" })).status).toBe(400);
+
+		await post("/api/deck", 9001, { action: "merge", books: ["fluent-react"], chapters: ["ai-engineering::1"] });
+		res = await post("/api/deck", 9001, { action: "remove", book: "docker-up-and-running" });
+		expect(await res.json()).toEqual({ deck: { books: ["fluent-react"], chapters: ["ai-engineering::1"] } });
+		expect(await (await api("/api/deck", 9001)).json()).toEqual({
+			deck: { books: ["fluent-react"], chapters: ["ai-engineering::1"] },
+		});
+	});
+
+	it("импорт гостевого прогресса не перетирает серверный и отбрасывает мусор", async () => {
+		resetSchemaCacheForTests();
+		const db = env.BOOK_CLUB_DB;
+		const now = Date.now();
+		await saveCardProgress(db, 9002, "docker", {
+			cardId: "docker:d1",
+			repetition: 3,
+			interval: 15,
+			easiness: 2.6,
+			dueDate: now + 1000,
+			lastReviewed: now - 1000,
+		});
+		const item = (card_id: string, interval: number) => ({
+			book_id: "docker",
+			card_id,
+			repetition: 1,
+			interval,
+			easiness: 2.5,
+			due_date: now,
+			last_reviewed: now - 5000,
+		});
+		const res = await post("/api/progress/import", 9002, {
+			items: [item("d1", 1), item("d2", 6), { book_id: "../x", card_id: "d3" }, item("d4", -5)],
+		});
+		expect(await res.json()).toEqual({ imported: 1 });
+		const map = await getCardProgressMap(db, 9002);
+		expect(map.get("docker:d1")?.interval).toBe(15);
+		expect(map.get("docker:d2")?.interval).toBe(6);
+		expect(map.has("docker:d3")).toBe(false);
+		expect(map.has("docker:d4")).toBe(false);
+	});
+
+	it("оценка карточки пишется в прогресс и в журнал", async () => {
+		resetSchemaCacheForTests();
+		const res = await post("/api/review", 9003, { card_id: "d1", book_id: "docker", grade: "good" });
+		expect(res.status).toBe(200);
+		const reviews = await listReviews(env.BOOK_CLUB_DB, 9003);
+		expect(reviews).toHaveLength(1);
+		expect(reviews[0].quality).toBe(4);
+		expect((await getCardProgressMap(env.BOOK_CLUB_DB, 9003)).get("docker:d1")?.repetition).toBe(1);
 	});
 });
 

@@ -1,9 +1,11 @@
-// Аутентификация платформы через Telegram. Два источника, оба проверяются
+// Аутентификация платформы через Telegram. Подписанные источники проверяются
 // токеном бота (HMAC-SHA256) на стороне Worker:
-//  - Login Widget (сайт в браузере): объект с полем hash;
-//  - Mini App initData (внутри Telegram): подписанная query-строка.
+//  - Mini App initData (внутри Telegram): подписанная query-строка;
+//  - Login Widget: объект с полем hash. Сайт им больше не пользуется — виджет
+//    подтверждает вход сообщением от Telegram по номеру телефона, и в России
+//    оно не доходит; в браузере вход идёт через бота (lib/login.ts).
 // После проверки выдаём подписанную сессию (userId + срок), которой подписаны
-// запросы к /api/me, /api/progress, /api/review.
+// запросы к /api/me, /api/progress, /api/review и т.д.
 
 export interface TgUser {
 	id: number;
@@ -37,6 +39,16 @@ async function hmac(keyRaw: Uint8Array, msg: string): Promise<Uint8Array> {
 
 async function sha256(msg: string): Promise<Uint8Array> {
 	return new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(msg)));
+}
+
+/** SHA-256 строки в hex — так хранятся секреты, которые нельзя держать как есть. */
+export async function sha256Hex(msg: string): Promise<string> {
+	return toHex(await sha256(msg));
+}
+
+/** Криптостойкая случайная строка: `bytes` байт в hex (длина вдвое больше). */
+export function randomHex(bytes: number): string {
+	return toHex(crypto.getRandomValues(new Uint8Array(bytes)));
 }
 
 /** Сравнение в постоянное время (защита от тайминг-атак). */

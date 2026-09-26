@@ -67,20 +67,21 @@ export async function handleLoginCallback(
 	}
 
 	const code = data.slice("login:".length);
-	// Сначала — запись в D1: сайт ждёт именно её, сообщения Telegram вторичны.
-	const confirmed = isLoginCode(code) && (await confirmLogin(env.BOOK_CLUB_DB, code, cb.from.id));
-	if (!confirmed) {
-		await editMessageText(env.BOT_TOKEN, chatId, message.message_id, EXPIRED_TEXT);
-		await answerCallback(env.BOT_TOKEN, cb.id);
-		return;
-	}
-
+	// Сначала — записи в D1: сайт ждёт именно их, сообщения Telegram вторичны.
+	// Профиль — до подтверждения: сайт забирает сессию сразу после него, и
+	// у новичка аккаунта к этому моменту ещё не было бы.
 	await upsertUser(env.BOOK_CLUB_DB, {
 		id: cb.from.id,
 		username: cb.from.username ?? null,
 		firstName: cb.from.first_name ?? null,
 		lastName: cb.from.last_name ?? null,
 	});
+	const confirmed = isLoginCode(code) && (await confirmLogin(env.BOOK_CLUB_DB, code, cb.from.id));
+	if (!confirmed) {
+		await editMessageText(env.BOT_TOKEN, chatId, message.message_id, EXPIRED_TEXT);
+		await answerCallback(env.BOT_TOKEN, cb.id);
+		return;
+	}
 	// Вошедший через бота ждёт от него напоминаний — как после /start.
 	const subscribed = await getSubscriber(env.BOOK_CLUB_KV, cb.from.id);
 	if (!subscribed) {

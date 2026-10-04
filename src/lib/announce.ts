@@ -6,7 +6,10 @@
 // главы из book-club-data и спикеры из заявок в D1. Поэтому дневной пост уже
 // знает спикеров, которых подтвердили после анонса.
 //
-// Без эмодзи: структуру держат жирные подзаголовки, пустые строки и ссылки.
+// Стиль — как у постов канала клуба (октябрь 2026): первой строкой
+// «Книжный клуб №N: название» (жирным только клуб с номером), дальше блоки
+// через пустую строку — жирные дата и подзаголовки, нумерованная программа,
+// ссылки. Эмодзи один — рупор в заголовке анонса; остальной текст без них.
 // Всё, что называет человека или ресурс, — ссылка: спикеры и ведущие ведут в
 // Telegram, книга — на страницу издателя (или на книгу в приложении клуба).
 
@@ -166,26 +169,41 @@ function personLink(ctx: AnnounceContext, person: { name: string; speaker_id?: s
 	return url ? link(url, person.name) : esc(person.name);
 }
 
-/** «Книжный клуб №114: Начинаем новую книгу!» — номер стрима, если задан. */
-function heading(ctx: AnnounceContext): string {
+/** Рупор в заголовке анонса — единственный эмодзи в постах. */
+export const ANNOUNCE_MARK = "🔊 ";
+
+/**
+ * «Книжный клуб №118: Глава 1 - Роль алгоритмов» — номер стрима, если задан.
+ * Жирным только клуб с номером: название встречи читается обычным текстом.
+ */
+function heading(ctx: AnnounceContext, mark = ""): string {
 	const { event } = ctx;
 	const prefix = event.stream ? `Книжный клуб №${event.stream}` : "Книжный клуб";
-	return `<b>${esc(prefix)}: ${esc(event.title)}</b>`;
+	return `${mark}<b>${esc(prefix)}:</b> ${esc(event.title)}`;
 }
 
-/** «Читаем «Название» (ссылка) — Автор». */
-function bookLine(ctx: AnnounceContext, verb = "Читаем"): string | null {
+/**
+ * «Начинаем в клубе читать новую книгу — Название (жирная ссылка) от Авторов».
+ * Новая книга — когда в программе её первая глава; иначе просто «Читаем книгу».
+ */
+function bookLine(ctx: AnnounceContext): string | null {
 	const book = ctx.book;
 	if (!book) return null;
-	const title = book.url ? link(book.url, `«${book.title}»`) : `«${esc(book.title)}»`;
-	const authors = book.authors.length > 0 ? ` — ${esc(book.authors.join(", "))}` : "";
-	return `${verb} ${title}${authors}`;
+	const first = programChapters(ctx).some((c) => c.order === 1);
+	const title = `<b>${book.url ? link(book.url, book.title) : esc(book.title)}</b>`;
+	const authors = book.authors.length > 0 ? ` от ${esc(book.authors.join(", "))}` : "";
+	const lead = first ? "Начинаем в клубе читать новую книгу" : "Читаем книгу";
+	return `${lead} — ${title}${authors}`;
 }
 
 /**
  * Что сделать до встречи. Собирается из самой встречи — глава с названием
  * и страницы уже известны, поэтому руками в CMS ничего не заполняют.
  * Поле `assignment` в событии, если оно задано, перекрывает шаблон.
+ *
+ * У «докладов» задание пишем, только когда оно задано явно (текстом или
+ * страницами): главу там называют заголовок и программа, и строка
+ * «прочитать главу…» лишь повторяла бы их.
  */
 function assignmentLines(ctx: AnnounceContext): string[] {
 	const { event } = ctx;
@@ -195,6 +213,7 @@ function assignmentLines(ctx: AnnounceContext): string[] {
 		const parts = [esc(event.assignment.trim()), pages].filter(Boolean);
 		return [`<b>Готовимся:</b> ${parts.join(", ")}`];
 	}
+	if (event.type === "live-talk" && !pages) return [];
 
 	// Глав на стриме может быть несколько (и даже из разных книг) — тогда
 	// перечисляем все: «прочитать главы 9 «…» и 10 «…»».
@@ -251,7 +270,7 @@ function topicLines(ctx: AnnounceContext): string[] {
 
 /**
  * Куда идти: трансляции одной строкой, созвон, доска и материалы — своими.
- * Вместо иконок ссылки подписаны словами, иначе без эмодзи это просто список.
+ * Вместо иконок ссылки подписаны словами.
  */
 function linkLines(ctx: AnnounceContext): string[] {
 	const { event } = ctx;
@@ -289,15 +308,16 @@ export function renderAnnounce(ctx: AnnounceContext): string {
 	const { event } = ctx;
 	const moderators = (event.moderators ?? []).filter((m) => m.name);
 
+	const program = event.type === "live-talk" ? topicLines(ctx) : [];
+
 	return join([
-		heading(ctx),
+		heading(ctx, ANNOUNCE_MARK),
 		bookLine(ctx),
-		formatWhen(event.date, event.time),
+		`<b>${formatWhen(event.date, event.time)}</b>`,
 		assignmentLines(ctx),
 		// У «докладов» — программа тем; у обсуждения главу уже назвало задание.
-		event.type === "live-talk" && topicLines(ctx).length > 0
-			? ["<b>Программа:</b>", ...topicLines(ctx)]
-			: [],
+		program.length > 0 ? "<b>Программа:</b>" : null,
+		program,
 		moderators.length > 0
 			? `Ведут: ${moderators.map((m) => personLink(ctx, m)).join(", ")}`
 			: null,
@@ -308,12 +328,13 @@ export function renderAnnounce(ctx: AnnounceContext): string {
 /** Пост в день встречи (с новой афишей). */
 export function renderDay(ctx: AnnounceContext): string {
 	const { event } = ctx;
+	const program = event.type === "live-talk" ? topicLines(ctx) : [];
 	return join([
 		heading(ctx),
-		bookLine(ctx, "На этом стриме читаем"),
-		`Сегодня в ${esc(event.time)} МСК`,
-		event.type === "live-talk" && topicLines(ctx).length > 0
-			? ["<b>Рассмотрим темы:</b>", ...topicLines(ctx)]
+		`<b>Сегодня в ${esc(event.time)} МСК</b>`,
+		program.length > 0 ? "<b>Рассмотрим темы:</b>" : null,
+		program.length > 0
+			? program
 			: ctx.chapterTitle
 				? [`Разбираем главу ${ctx.chapterOrder} — ${esc(ctx.chapterTitle)}`]
 				: [],
@@ -324,11 +345,7 @@ export function renderDay(ctx: AnnounceContext): string {
 
 /** Напоминание за 5 минут до начала. */
 export function renderSoon(ctx: AnnounceContext): string {
-	const { event } = ctx;
-	return join([
-		`<b>Через 5 минут начинаем</b> — ${esc(event.title)}`,
-		linkLines(ctx),
-	]);
+	return join([heading(ctx), "<b>Через 5 минут начинаем</b>", linkLines(ctx)]);
 }
 
 export function renderAnnouncement(kind: AnnounceKind, ctx: AnnounceContext): string {

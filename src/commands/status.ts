@@ -14,6 +14,6 @@ export async function handleStatus(env: Env, message: TelegramMessage): Promise<
 		env.BOT_TOKEN,
 		chatId,
 		renderStatus(stats),
-		appKeyboard(env, "📊 Подробная статистика", "/account"),
+		appKeyboard(env, "📊 Подробная статистика", "/study"),
 	);
 }

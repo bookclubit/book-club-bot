@@ -27,7 +27,7 @@ import {
 import { renderDueCards, renderStatus } from "../src/lib/reminders";
 import { appKeyboard } from "../src/lib/urls";
 import { mergeTalkTopics } from "../src/lib/topics";
-import { buildTopics, renderAnnounce, renderDay, renderSoon } from "../src/lib/announce";
+import { ANNOUNCE_MARK, buildTopics, renderAnnounce, renderDay, renderSoon } from "../src/lib/announce";
 import {
 	getDraftPoster,
 	prepareDrafts,
@@ -304,7 +304,15 @@ describe("Программа эфира: несколько глав и книг
 	});
 
 	const ctx = {
-		event: { id: event.id, type: "live-talk" as const, title: event.title, date: event.date, time: event.time },
+		// Страницы заданы — у «докладов» задание пишется только с ними.
+		event: {
+			id: event.id,
+			type: "live-talk" as const,
+			title: event.title,
+			date: event.date,
+			time: event.time,
+			pages: { from: 210, to: 260 },
+		},
 		chapters: [
 			{
 				order: 9,
@@ -975,13 +983,17 @@ describe("Посты о встрече в группу клуба", () => {
 
 	it("анонс: номер стрима, книга с автором, дата по-русски, темы со спикерами", () => {
 		const text = renderAnnounce(ctx);
-		expect(text).toContain("Книжный клуб №114: Начинаем новую книгу!");
-		expect(text).toContain("Пятница, 24 июля, в 18:00 МСК");
-		expect(text).toContain('<a href="https://oreilly.com/ai-engineering">«AI-инженерия»</a>');
-		expect(text).toContain("Чип Хьюен");
-		// Задание собирается само: главу и её название бот знает из данных.
-		expect(text).toContain("Готовимся:</b> прочитать главу 1 «Основы создания AI-приложений»");
-		expect(text).toContain("на эфире её разбирают докладчики");
+		// Жирным — только клуб с номером, перед ним рупор.
+		expect(text.startsWith("🔊 <b>Книжный клуб №114:</b> Начинаем новую книгу!")).toBe(true);
+		expect(text).toContain("<b>Пятница, 24 июля, в 18:00 МСК</b>");
+		// Первая глава — значит, книга новая; название — жирная ссылка.
+		expect(text).toContain(
+			'Начинаем в клубе читать новую книгу — <b><a href="https://oreilly.com/ai-engineering">AI-инженерия</a></b> от Чип Хьюен',
+		);
+		// У «докладов» задания нет: главу называют заголовок и программа.
+		expect(text).not.toContain("Готовимся:");
+		// Подзаголовок программы отделён от списка пустой строкой.
+		expect(text).toContain("<b>Программа:</b>\n\n1. Восход AI-инженерии");
 		// Спикер в программе — ссылка на его Telegram.
 		expect(text).toContain(
 			'1. Восход AI-инженерии — <a href="https://t.me/kunjutone">Антон Помазков</a>',
@@ -991,7 +1003,13 @@ describe("Посты о встрече в группу клуба", () => {
 		expect(text).toContain('Трансляция: <a href="https://youtu.be/x">YouTube</a>');
 	});
 
-	it("в постах нет эмодзи — структуру держат подзаголовки и ссылки", () => {
+	it("не первая глава — книгу «читаем», а не «начинаем»", () => {
+		const text = renderAnnounce({ ...ctx, chapterOrder: 4 });
+		expect(text).toContain("Читаем книгу — <b><a");
+		expect(text).not.toContain("новую книгу —");
+	});
+
+	it("эмодзи один — рупор в заголовке анонса", () => {
 		const emoji = /\p{Extended_Pictographic}/u;
 		const withEverything = {
 			...ctx,
@@ -1002,8 +1020,10 @@ describe("Посты о встрече в группу клуба", () => {
 				moderators: [{ name: "Артём Никифоров", speaker_id: "nikiforov-artem" }],
 			},
 		};
+		const announce = renderAnnounce(withEverything);
+		expect(announce.startsWith(ANNOUNCE_MARK)).toBe(true);
 		for (const text of [
-			renderAnnounce(withEverything),
+			announce.slice(ANNOUNCE_MARK.length),
 			renderDay(withEverything),
 			renderSoon(withEverything),
 		]) {
@@ -1036,15 +1056,17 @@ describe("Посты о встрече в группу клуба", () => {
 
 	it("пост в день встречи: программа и презентации сдавших спикеров", () => {
 		const text = renderDay(ctx);
-		expect(text).toContain("На этом стриме читаем");
-		expect(text).toContain("Рассмотрим темы:");
-		expect(text).toContain("Сегодня в 18:00 МСК");
+		expect(text.startsWith("<b>Книжный клуб №114:</b> Начинаем новую книгу!")).toBe(true);
+		expect(text).toContain("<b>Рассмотрим темы:</b>\n\n1. Восход AI-инженерии");
+		expect(text).toContain("<b>Сегодня в 18:00 МСК</b>");
 		expect(text).toContain("Презентация — Стек AI-инженерии");
 	});
 
 	it("напоминание за 5 минут: коротко и со ссылками", () => {
 		const text = renderSoon(ctx);
-		expect(text).toContain("Через 5 минут начинаем");
+		expect(text).toContain(
+			"<b>Книжный клуб №114:</b> Начинаем новую книгу!\n\n<b>Через 5 минут начинаем</b>",
+		);
 		expect(text).toContain("VK");
 		// Программа в напоминании не повторяется.
 		expect(text).not.toContain("Восход AI-инженерии");

@@ -22,6 +22,11 @@ const cards = (n: number): string => `${n} ${plural(n, "карточка", "ка
 
 /** Кнопка под напоминанием: сразу в повторение внутри Telegram. */
 export const STUDY_BUTTON = "🗂 Повторить карточки";
+/**
+ * Куда она ведёт: общая сессия приложения — карточки к повторению из всех книг
+ * колоды вперемешку. Список книг и календарь остались на `/study`.
+ */
+export const STUDY_PATH = "/study/all";
 
 /** Сколько и по каким книгам пора повторить. Книги — только с карточками к повторению. */
 export function renderDueCards(due: BookStats[], opts: { morning?: boolean } = {}): string {
@@ -96,7 +101,7 @@ export async function runCardReminders(env: Env): Promise<void> {
 				env.BOT_TOKEN,
 				sub.chatId,
 				renderDueCards(due, { morning: true }),
-				appKeyboard(env, STUDY_BUTTON, "/study"),
+				appKeyboard(env, STUDY_BUTTON, STUDY_PATH),
 			);
 			sent++;
 		} catch (err) {
